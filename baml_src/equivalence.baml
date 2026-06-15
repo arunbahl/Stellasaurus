@@ -42,7 +42,7 @@ class EquivalenceVerdict {
 }
 
 function EvaluateEquivalence(contract_a: Contract, contract_b: Contract) -> EquivalenceVerdict {
-  client Fireworks
+  client Fireworks_DeepSeekV4Flash
   prompt #"
     You compare two binary event contracts to decide whether they resolve on the
     SAME acceptance criteria, so that holding offsetting legs forms a risk-free

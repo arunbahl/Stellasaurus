@@ -20,12 +20,30 @@ def test_polymarket_ed25519_signature_verifies():
     signer = PolymarketSigner("akey", base64.b64encode(seed).decode())
     ts, method, path = 1_700_000_000_000, "GET", "/v1/markets"
     sig = signer.sign(timestamp_ms=ts, method=method, path=path)
-    message = f"{ts}|{method}|{path}".encode()
+    message = f"{ts}{method}{path}".encode()  # no delimiters
     key.public_key().verify(base64.b64decode(sig), message)  # raises if invalid
 
     headers = signer.headers(timestamp_ms=ts, method="get", path=path)
     assert headers["X-PM-Access-Key"] == "akey"
     assert headers["X-PM-Timestamp"] == str(ts)
+
+
+def test_polymarket_accepts_libsodium_64byte_secret():
+    # Polymarket issues the 64-byte libsodium secret (seed||pubkey); the signer
+    # must sign with the first 32 bytes and verify against the public key.
+    key = Ed25519PrivateKey.generate()
+    seed = key.private_bytes(
+        serialization.Encoding.Raw,
+        serialization.PrivateFormat.Raw,
+        serialization.NoEncryption(),
+    )
+    pub = key.public_key().public_bytes_raw()
+    secret64 = base64.b64encode(seed + pub).decode()  # libsodium layout
+
+    signer = PolymarketSigner("akey", secret64)
+    ts, method, path = 1_700_000_000_000, "GET", "/v1/events"
+    sig = signer.sign(timestamp_ms=ts, method=method, path=path)
+    key.public_key().verify(base64.b64decode(sig), f"{ts}{method}{path}".encode())
 
 
 def test_kalshi_rsa_pss_signature_verifies_and_strips_query(tmp_path):

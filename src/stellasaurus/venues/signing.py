@@ -5,8 +5,10 @@ present; keyless Phase 1 uses public REST reads that need no signature.
 
 Kalshi:     RSA-PSS / SHA-256 over ``{timestamp_ms}{METHOD}{path}`` (query stripped),
             base64-encoded. Headers KALSHI-ACCESS-KEY/-SIGNATURE/-TIMESTAMP.
-Polymarket: Ed25519 over ``{timestamp_ms}|{METHOD}|{path}``, base64-encoded.
-            Headers X-PM-Access-Key/-Timestamp/-Signature.
+Polymarket: Ed25519 over ``{timestamp_ms}{METHOD}{path}`` (no delimiters),
+            base64-encoded. Headers X-PM-Access-Key/-Timestamp/-Signature. The
+            issued secret is the libsodium 64-byte key (seed||pubkey); we sign
+            with the first 32 bytes.
 """
 
 from __future__ import annotations
@@ -56,13 +58,25 @@ class KalshiSigner:
 class PolymarketSigner:
     def __init__(self, access_key: str, ed25519_seed_b64: str) -> None:
         self.access_key = access_key
-        seed = base64.b64decode(ed25519_seed_b64)
-        if len(seed) != 32:
-            raise ValueError("Polymarket Ed25519 seed must be 32 bytes (base64)")
+        raw = base64.b64decode(ed25519_seed_b64)
+        # Accept either a raw 32-byte seed or the libsodium/NaCl 64-byte secret
+        # key (seed[32] || public_key[32]) that Polymarket issues; the signing
+        # seed is the first 32 bytes in the latter.
+        if len(raw) == 64:
+            seed = raw[:32]
+        elif len(raw) == 32:
+            seed = raw
+        else:
+            raise ValueError(
+                f"Polymarket Ed25519 secret must decode to 32 or 64 bytes (got {len(raw)})"
+            )
         self._key = Ed25519PrivateKey.from_private_bytes(seed)
 
     def sign(self, *, timestamp_ms: int, method: str, path: str) -> str:
-        message = f"{timestamp_ms}|{method.upper()}|{path}".encode()
+        # Message is timestamp + METHOD + path concatenated, no delimiters
+        # (verified against the live API: pipe-separated -> 401 Invalid signature;
+        # this form authenticates). Query string is not included.
+        message = f"{timestamp_ms}{method.upper()}{path}".encode()
         return base64.b64encode(self._key.sign(message)).decode("ascii")
 
     def headers(self, *, timestamp_ms: int, method: str, path: str) -> dict[str, str]:
