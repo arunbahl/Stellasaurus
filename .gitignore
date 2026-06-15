@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Virtualenv
+.venv/
+venv/
+
+# uv (uv.lock IS committed for apps — do not ignore it)
+
+# Local data / secrets
+data/
+*.db
+*.db-wal
+*.db-shm
+.env
+secrets/
+*.pem
+
+# Tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Editors
+.vscode/
+.idea/

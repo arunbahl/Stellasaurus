@@ -1,0 +1,3 @@
+{"venue": "KALSHI", "native_id": "KXBTC", "payload": {"orderbook": {"yes": [[58, 10], [57, 20]], "no": [[40, 15]]}}}
+{"venue": "POLYMARKET", "native_id": "btc-100k", "payload": {"book": {"bids": [{"px": "0.59", "qty": "8"}], "offers": [{"px": "0.62", "qty": "6"}]}}}
+{"venue": "KALSHI", "native_id": "KXBTC", "payload": {"orderbook": {"yes": [[59, 12]], "no": [[41, 9]]}}}

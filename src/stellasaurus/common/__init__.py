@@ -1,0 +1,1 @@
+"""Stellasaurus common plane."""

@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Stellasaurus — Phase 1</title>
+  <style>
+    :root { color-scheme: dark; }
+    body { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; margin: 0;
+           background: #0d1117; color: #c9d1d9; font-size: 13px; }
+    header { padding: 12px 20px; border-bottom: 1px solid #21262d; display: flex;
+             align-items: baseline; gap: 16px; }
+    header h1 { font-size: 16px; margin: 0; color: #58a6ff; }
+    header .sub { color: #8b949e; }
+    #conn { margin-left: auto; }
+    main { padding: 16px 20px; display: grid; gap: 20px; }
+    section { border: 1px solid #21262d; border-radius: 6px; padding: 12px 16px; }
+    section h2 { font-size: 13px; margin: 0 0 10px; color: #8b949e; text-transform: uppercase;
+                 letter-spacing: .05em; }
+    table { border-collapse: collapse; width: 100%; }
+    th, td { text-align: left; padding: 4px 10px; border-bottom: 1px solid #161b22; white-space: nowrap; }
+    th { color: #8b949e; font-weight: 600; }
+    .pill { padding: 1px 7px; border-radius: 10px; font-size: 11px; }
+    .ok { background: #1a472a; color: #7ee787; }
+    .bad { background: #4a1212; color: #ff7b72; }
+    .warn { background: #4d3800; color: #e3b341; }
+    .muted { color: #6e7681; }
+    .edge-pos { color: #7ee787; font-weight: 600; }
+    .edge-neg { color: #6e7681; }
+    .derived { color: #e3b341; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Stellasaurus</h1>
+    <span class="sub">Phase 1 — read-only spine · paper/sim · no trading</span>
+    <span id="conn" class="pill bad">disconnected</span>
+  </header>
+  <main>
+    <section>
+      <h2>Feed health</h2>
+      <table id="feeds"><thead><tr><th>Venue</th><th>Transport</th><th>Connected</th>
+        <th>Frames</th><th>Reconnects</th><th>Last frame</th></tr></thead><tbody></tbody></table>
+    </section>
+    <section>
+      <h2>Live normalized books (canonical-YES) &amp; display-only gross edge</h2>
+      <table id="books"><thead><tr>
+        <th>Pair</th><th>Fresh</th>
+        <th>K yes ask</th><th>K no ask</th><th>P yes ask</th><th>P no ask</th>
+        <th>A: K-YES/P-NO</th><th>B: P-YES/K-NO</th>
+      </tr></thead><tbody></tbody></table>
+    </section>
+    <section>
+      <h2>Verified Pair Registry</h2>
+      <table id="pairs"><thead><tr><th>Pair</th><th>Status</th><th>Polarity</th>
+        <th>Kalshi</th><th>Polymarket</th><th>Resolves</th><th>Source</th><th>Fingerprint</th>
+      </tr></thead><tbody></tbody></table>
+    </section>
+    <section>
+      <h2>Catalog</h2>
+      <div id="catalog" class="muted">—</div>
+    </section>
+  </main>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const conn = $("conn");
+    const fmtTs = (ms) => ms ? new Date(ms).toLocaleTimeString() : "—";
+    const pill = (text, cls) => `<span class="pill ${cls}">${text}</span>`;
+
+    function renderFeeds(feeds) {
+      $("feeds").querySelector("tbody").innerHTML = feeds.map(f => `
+        <tr><td>${f.venue}</td><td>${f.transport}</td>
+        <td>${f.connected ? pill("yes","ok") : pill("no","bad")}</td>
+        <td>${f.frames}</td><td>${f.reconnects}</td><td>${fmtTs(f.last_frame_ms)}</td></tr>`).join("");
+    }
+
+    function edgeCell(o) {
+      if (!o) return '<span class="muted">—</span>';
+      const cls = o.gross_edge_micros > 0 ? "edge-pos" : "edge-neg";
+      return `<span class="${cls}">${o.gross_edge}</span> <span class="muted">(${o.cost})</span>`;
+    }
+    function askCell(side, key) {
+      if (!side || !side.present || !side[key]) return '<span class="muted">—</span>';
+      const src = key === "yes_ask" ? side.yes_side_source : side.no_side_source;
+      const tag = src === "DERIVED" ? ' <span class="derived">~</span>' : '';
+      return `${side[key]}${tag}`;
+    }
+
+    function renderBooks(books, freshness) {
+      const fresh = Object.fromEntries((freshness||[]).map(f => [f.pair_id, f.evaluable]));
+      $("books").querySelector("tbody").innerHTML = books.map(b => `
+        <tr><td>${b.pair_id}</td>
+        <td>${(b.evaluable ?? fresh[b.pair_id]) ? pill("fresh","ok") : pill("stale","warn")}</td>
+        <td>${askCell(b.kalshi,"yes_ask")}</td><td>${askCell(b.kalshi,"no_ask")}</td>
+        <td>${askCell(b.polymarket,"yes_ask")}</td><td>${askCell(b.polymarket,"no_ask")}</td>
+        <td>${edgeCell(b.orientations?.A_kalshiYES_polyNO)}</td>
+        <td>${edgeCell(b.orientations?.B_polyYES_kalshiNO)}</td></tr>`).join("");
+    }
+
+    function renderPairs(pairs) {
+      const statusCls = (s) => s === "VERIFIED" ? "ok" : (s === "STALE" ? "warn" : "bad");
+      $("pairs").querySelector("tbody").innerHTML = pairs.map(p => `
+        <tr><td>${p.pair_id}</td><td>${pill(p.status, statusCls(p.status))}</td>
+        <td>${p.outcome_polarity}</td><td>${p.kalshi_ticker}</td><td>${p.poly_market_slug}</td>
+        <td>${fmtTs(p.resolves_at_ms)}</td><td>${p.source}</td>
+        <td class="muted">${p.terms_fingerprint}</td></tr>`).join("");
+    }
+
+    function renderCatalog(c) {
+      const counts = c.counts ? Object.entries(c.counts).map(([k,v]) => `${k}: ${v}`).join(" · ") : "no sync yet";
+      $("catalog").textContent = `${counts}  |  last sync: ${fmtTs(c.last_sync_ms)}`;
+    }
+
+    function connect() {
+      const ws = new WebSocket(`ws://${location.host}/ws`);
+      ws.onopen = () => { conn.textContent = "connected"; conn.className = "pill ok"; };
+      ws.onclose = () => { conn.textContent = "disconnected"; conn.className = "pill bad"; setTimeout(connect, 1000); };
+      ws.onmessage = (ev) => {
+        const d = JSON.parse(ev.data);
+        renderFeeds(d.health?.feeds || []);
+        renderBooks(d.books || [], d.health?.freshness || []);
+        renderPairs(d.pairs || []);
+        renderCatalog(d.catalog || {});
+      };
+    }
+    connect();
+  </script>
+</body>
+</html>

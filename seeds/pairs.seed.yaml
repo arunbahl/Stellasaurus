@@ -1,0 +1,28 @@
+# Manual Verified Pair seed (Phase 1 stand-in for the LLM equivalence engine).
+#
+# Each entry asserts — by human judgment — that a Kalshi market and a Polymarket
+# US market resolve on the SAME acceptance criteria, and records the YES/NO
+# polarity mapping onto a single canonical proposition.
+#
+#   outcome_polarity:
+#     DIRECT   -> both venues' native YES == canonical YES
+#     INVERTED -> Polymarket's native YES == canonical NO (legs are flipped)
+#
+# In Phase 2 these rows are produced (and continuously re-verified) by the
+# Fireworks + BAML acceptance-criteria engine with source=LLM. For now they are
+# source=MANUAL_SEED and status=VERIFIED purely on the author's assertion.
+#
+# NOTE: the tickers/slugs below are EXAMPLES. Replace with real, currently-listed
+# markets before running the live smoke test.
+
+pairs:
+  - pair_id: example-btc-100k-2026
+    canonical_proposition: "Bitcoin reaches $100,000 before the contract's resolution date"
+    kalshi_ticker: KXBTC-26-100K
+    poly_market_slug: btc-100k
+    outcome_polarity: DIRECT
+    status: VERIFIED
+    acceptance_criteria_note: >-
+      Both resolve YES if BTC trades at or above $100,000 on the referenced
+      index before the stated cutoff. CONFIRM settlement source + cutoff match
+      before trading.

@@ -1,0 +1,60 @@
+# Stellasaurus default configuration (Phase 1).
+# Overridable via STELLA_* environment variables (see stellasaurus.common.config).
+
+# --- storage / seed ---
+db_path = "data/stella.db"
+seed_path = "seeds/pairs.seed.yaml"
+
+# --- timing ---
+catalog_refresh_seconds = 300
+book_staleness_ms = 2000
+rest_poll_interval_ms = 1000          # keyless fallback book-poll cadence
+dashboard_push_interval_ms = 250
+
+# --- venue endpoints ---
+# NOTE: DESIGN.md's api.kalshi.com host does NOT resolve; api.elections.kalshi.com
+# is the working production host (returns markets + orderbooks keyless).
+kalshi_rest_base = "https://api.elections.kalshi.com/trade-api/v2"
+kalshi_ws_url = "wss://api.elections.kalshi.com/trade-api/ws/v2"
+poly_rest_base = "https://api.polymarket.us"
+poly_ws_url = "wss://api.polymarket.us/v1/ws/markets"
+
+# --- subscription limits ---
+poly_markets_per_conn = 100
+kalshi_max_ws_conns = 5
+
+# --- dashboard ---
+# Reachability: "tailnet" binds loopback + this host's Tailscale IP, so only
+# localhost and tailnet peers can reach it (the LAN cannot). "localhost" = loopback
+# only; "all" = 0.0.0.0 (explicit LAN exposure). Set dashboard_host to force a
+# single bind address.
+dashboard_expose = "tailnet"
+dashboard_port = 8770
+
+# --- [UI]-settable later (Phase 4); read-only defaults now ---
+theta_micros = 20000                  # $0.02 min net edge per pair
+hurdle = 0.10                         # 10% min annualized return
+target_size_default = 10
+max_bet_value_micros = 50000000       # $50 cap per single entry
+max_bet_value_ceiling_micros = 500000000   # $500 absolute ceiling
+max_aggregate_exposure_micros = 5000000000 # $5000
+max_open_pairs = 20
+max_committed_capital_micros = 5000000000  # $5000
+min_t_days = 0.5
+
+# --- fee params (used Phase 3; cached now) ---
+kalshi_fee_multiplier_default = 0.07
+kalshi_balance_precision_micros = 10000   # $0.01 standard account
+poly_taker_bps_default = 10
+poly_min_fee_micros = 1000            # $0.001
+fee_divergence_tolerance_micros = 10000
+slippage_tolerance_bips = 50
+fee_param_refresh_seconds = 3600
+execution_policy_default = "TAKER_BOTH"
+
+# --- equivalence LLM (Phase 2) ---
+# Configured in baml_src/clients.baml (Fireworks client) + env vars
+# FIREWORKS_LLM_ENDPOINT / FIREWORKS_API_KEY_BAML. Nothing to set here.
+
+# --- safety gate ---
+live_trading_enabled = false
