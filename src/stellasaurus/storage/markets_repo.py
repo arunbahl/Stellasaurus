@@ -91,6 +91,19 @@ class MarketsRepo:
             ).fetchall()
         return [_to_row(r) for r in rows]
 
+    def near_resolution_native_ids(
+        self, venue: Venue, *, now_ms: int, window_ms: int
+    ) -> list[str]:
+        """Native ids of markets resolving within the window (priority sweep)."""
+        with self._db.connect() as conn:
+            rows = conn.execute(
+                "SELECT native_id FROM markets WHERE venue=? "
+                "AND resolves_at_ms IS NOT NULL AND resolves_at_ms > ? "
+                "AND resolves_at_ms <= ?",
+                (venue.value, now_ms, now_ms + window_ms),
+            ).fetchall()
+        return [r["native_id"] for r in rows]
+
     def count_by_venue(self) -> dict[str, int]:
         with self._db.connect() as conn:
             rows = conn.execute(

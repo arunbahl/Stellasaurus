@@ -33,7 +33,7 @@
 <body>
   <header>
     <h1>Stellasaurus</h1>
-    <span class="sub">Phase 1 — read-only spine · paper/sim · no trading</span>
+    <span class="sub">paper trading · all phases active · live gated off</span>
     <span id="halt-state" class="pill ok" style="margin-left:auto">active</span>
     <button id="halt-btn" style="margin-left:10px;background:#21262d;color:#c9d1d9;border:1px solid #30363d;border-radius:6px;padding:3px 12px;cursor:pointer">HALT</button>
     <span id="conn" class="pill bad" style="margin-left:10px">disconnected</span>
@@ -43,6 +43,7 @@
       <h2>Feed health</h2>
       <table id="feeds"><thead><tr><th>Venue</th><th>Transport</th><th>Connected</th>
         <th>Frames</th><th>Reconnects</th><th>Last frame</th></tr></thead><tbody></tbody></table>
+      <div id="latency" class="muted" style="margin-top:8px">latency: —</div>
     </section>
     <section>
       <h2>Paper positions &amp; risk</h2>
@@ -88,6 +89,13 @@
     const fmtTs = (ms) => ms ? new Date(ms).toLocaleTimeString() : "—";
     const pill = (text, cls) => `<span class="pill ${cls}">${text}</span>`;
 
+    function renderLatency(rows) {
+      $("latency").textContent = rows.length
+        ? "latency: " + rows.map(x =>
+            `${x.stage} p50=${x.p50_us}µs p95=${x.p95_us}µs (n=${x.count})`
+          ).join("  ·  ")
+        : "latency: —";
+    }
     function renderFeeds(feeds) {
       $("feeds").querySelector("tbody").innerHTML = feeds.map(f => `
         <tr><td>${f.venue}</td><td>${f.transport}</td>
@@ -137,7 +145,8 @@
       $("halt-btn").textContent = halted ? "RESUME" : "HALT";
       $("pos-totals").textContent =
         `open pairs: ${t.open_pairs ?? 0} · committed: ${t.committed ?? "$0"} · ` +
-        `unwinds: ${t.unwind_count ?? 0} (loss ${t.unwind_loss ?? "$0"})`;
+        `unwinds: ${t.unwind_count ?? 0} (loss ${t.unwind_loss ?? "$0"}) · ` +
+        `settled: ${t.settled ?? 0} · realized P&L: ${t.realized_pnl ?? "$0"}`;
       $("positions").querySelector("tbody").innerHTML = (p.open || []).map(x => `
         <tr><td>${x.position_id.slice(0,28)}</td><td>${x.pair_id.slice(0,36)}</td>
         <td>${x.orientation}</td><td>${x.qty}</td><td>${x.yes_price}</td>
@@ -189,6 +198,7 @@
       ws.onmessage = (ev) => {
         const d = JSON.parse(ev.data);
         renderFeeds(d.health?.feeds || []);
+        renderLatency(d.health?.latency || []);
         renderPositions(d.positions || {});
         renderOpps(d.opportunities || {});
         renderBooks(d.books || [], d.health?.freshness || []);

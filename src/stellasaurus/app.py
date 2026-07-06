@@ -78,10 +78,16 @@ async def run(settings: Settings | None = None) -> None:
     # FIREWORKS_* directly from os.environ) and STELLA_ settings both see it.
     load_dotenv()
     settings = settings or load_settings()
+    if settings.kalshi_env == "demo":
+        settings = settings.model_copy(update={
+            "kalshi_rest_base": settings.kalshi_demo_rest_base,
+            "kalshi_ws_url": settings.kalshi_demo_ws_url,
+        })
     configure_logging()
     _log.info(
         "starting",
         kalshi_creds=settings.kalshi_credentials_present,
+        kalshi_env=settings.kalshi_env,
         poly_creds=settings.poly_credentials_present,
         live_trading=settings.live_trading_enabled,
     )
@@ -290,6 +296,47 @@ async def run(settings: Settings | None = None) -> None:
         supervisor.run_periodic(
             "catalog_sync", settings.catalog_refresh_seconds, catalog.sync_once
         )
+        # Phase 2 pairing loop (built unconditionally — the structured-only pass
+        # needs no LLM; the LLM-spending periodic is gated on configuration).
+        engine = EquivalenceEngine()
+        pairing = PairingLoop(
+            markets_repo=markets_repo,
+            engine=engine,
+            registry_repo=registry_repo,
+            audit_repo=audit_repo,
+            publish=loader.publish,
+            max_llm_calls=settings.pairing_max_llm_calls,
+            min_score=settings.pairing_min_score,
+        )
+        if settings.pairing_enabled and engine.configured:
+
+            async def pairing_cycle() -> None:
+                await pairing.run_once()
+
+            supervisor.run_periodic(
+                "pairing", settings.pairing_refresh_seconds, pairing_cycle
+            )
+        else:
+            _log.info(
+                "pairing_llm_disabled",
+                enabled=settings.pairing_enabled,
+                llm_configured=engine.configured,
+            )
+
+        # Near-resolution priority cycle: fast re-sync of imminent markets +
+        # STRUCTURED-ONLY pairing (llm_budget=0), so game-day pairs are verified
+        # and streaming before game time.
+        async def priority_cycle() -> None:
+            await catalog.sync_priority(
+                now_ms=wall_ms(),
+                window_ms=settings.priority_window_hours * 3_600_000,
+            )
+            if settings.pairing_enabled:
+                await pairing.run_once(llm_budget=0)
+
+        supervisor.run_periodic(
+            "priority_sync", settings.priority_sync_seconds, priority_cycle
+        )
         supervisor.run_periodic("opportunity_drain", 5, drain_opportunities)
         supervisor.run_periodic("halt_watch", 10, halt.watch_once)
 
@@ -304,32 +351,6 @@ async def run(settings: Settings | None = None) -> None:
         )
         if settings.live_trading_enabled and hasattr(executor, "run"):
             supervisor.supervise("live_execution", executor.run)
-
-        # Phase 2 pairing loop: candidates -> LLM verdicts -> registry (source=LLM).
-        engine = EquivalenceEngine()
-        if settings.pairing_enabled and engine.configured:
-            pairing = PairingLoop(
-                markets_repo=markets_repo,
-                engine=engine,
-                registry_repo=registry_repo,
-                audit_repo=audit_repo,
-                publish=loader.publish,
-                max_llm_calls=settings.pairing_max_llm_calls,
-                min_score=settings.pairing_min_score,
-            )
-
-            async def pairing_cycle() -> None:
-                await pairing.run_once()
-
-            supervisor.run_periodic(
-                "pairing", settings.pairing_refresh_seconds, pairing_cycle
-            )
-        else:
-            _log.info(
-                "pairing_disabled",
-                enabled=settings.pairing_enabled,
-                llm_configured=engine.configured,
-            )
 
         hosts = resolve_bind_hosts(settings.dashboard_expose, settings.dashboard_host)
         servers = []

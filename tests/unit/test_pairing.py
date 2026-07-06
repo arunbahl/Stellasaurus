@@ -171,3 +171,19 @@ async def test_pairing_loop_respects_llm_budget(tmp_path):
     )
     assert await loop.run_once() == 2
     assert engine.calls == 2
+
+
+async def test_structured_only_pass_spends_no_llm(tmp_path):
+    registry, markets, audit_repo, loader, store = _fixture(tmp_path)
+    _catalog(markets, [
+        _m(Venue.KALSHI, "K1", "Highest temperature in NYC 83 or below today"),
+        _m(Venue.POLYMARKET, "P1", "Highest temperature in NYC 83 or below today"),
+    ])
+    engine = FakeEngine(equivalent_ids={"K1"})
+    loop = PairingLoop(
+        markets_repo=markets, engine=engine, registry_repo=registry,
+        audit_repo=audit_repo, publish=loader.publish, max_llm_calls=10,
+    )
+    evaluated = await loop.run_once(llm_budget=0)
+    assert evaluated == 0
+    assert engine.calls == 0  # nothing spent on the LLM

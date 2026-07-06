@@ -99,6 +99,25 @@ class KalshiClient(VenueClient):
         _log.info("listed_series", count=len(tickers))
         return tickers
 
+    async def list_markets_for_series(self, series: list[str]) -> list[RawMarket]:
+        """Open markets for an explicit series list (priority sweep — small,
+        targeted, no rotation state touched)."""
+        markets: list[RawMarket] = []
+        for st in series:
+            try:
+                data = await self._get(
+                    "/markets",
+                    params={"limit": 200, "status": "open", "series_ticker": st},
+                )
+            except httpx.HTTPStatusError:
+                continue
+            for raw in data.get("markets", []):
+                m = self._to_raw(raw)
+                if m is not None:
+                    markets.append(m)
+            await asyncio.sleep(self._page_pause_s)
+        return markets
+
     async def list_markets(self) -> list[RawMarket]:
         """Sweep the next chunk of the full series rotation and return their open
         markets. Successive calls advance the rotation so ALL ~11k series are

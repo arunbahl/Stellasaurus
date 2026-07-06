@@ -70,6 +70,21 @@ class Settings(BaseSettings):
     # --- feed re-planning ---
     subscription_check_seconds: int = 30  # registry-change poll for feed re-plan
 
+    # --- near-resolution priority sweep (in-game readiness) ---
+    # Game-day markets list hours before start; the slow full rotation may not
+    # revisit their series in time. This fast cycle re-syncs any Kalshi series
+    # with markets resolving inside the window + a fresh Polymarket pull, then
+    # runs a STRUCTURED-ONLY pairing pass (no LLM spend) so pairs are verified
+    # and streaming before the game begins.
+    priority_sync_seconds: int = 120
+    priority_window_hours: int = 24
+
+    # --- Kalshi environment: "prod" or "demo" (fake-money, separate keys).
+    # Demo is the validation ground for the Phase-6 order gateways.
+    kalshi_env: str = "prod"
+    kalshi_demo_rest_base: str = "https://demo-api.kalshi.co/trade-api/v2"
+    kalshi_demo_ws_url: str = "wss://demo-api.kalshi.co/trade-api/ws/v2"
+
     # --- dashboard ---
     # Reachability. "tailnet" (default) binds loopback + this host's Tailscale IP
     # so only localhost and tailnet peers can reach it (NOT the LAN). "localhost"

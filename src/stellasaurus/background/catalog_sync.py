@@ -43,6 +43,31 @@ class CatalogSync:
         self.last_sync_ms: int | None = None
         self.last_counts: dict[str, int] = {}
 
+    async def sync_priority(self, *, now_ms: int, window_ms: int) -> int:
+        """Fast re-sync of everything resolving inside the window: the Kalshi
+        SERIES containing near-resolution markets (targeted pulls; picks up
+        just-listed siblings like game-day markets) plus a fresh Polymarket
+        catalog. Returns the number of Kalshi series refreshed."""
+        near = self._markets.near_resolution_native_ids(
+            Venue.KALSHI, now_ms=now_ms, window_ms=window_ms
+        )
+        series = sorted({t.split("-", 1)[0] for t in near})
+        kalshi = self._clients[Venue.KALSHI]
+        if series and hasattr(kalshi, "list_markets_for_series"):
+            try:
+                for m in await kalshi.list_markets_for_series(series):
+                    self._upsert(m)
+            except Exception as exc:  # noqa: BLE001
+                _log.warning("priority_kalshi_failed", error=str(exc))
+        try:
+            for m in await self._clients[Venue.POLYMARKET].list_markets():
+                self._upsert(m)
+        except Exception as exc:  # noqa: BLE001
+            _log.warning("priority_poly_failed", error=str(exc))
+        self._on_updated()
+        _log.info("priority_synced", kalshi_series=len(series))
+        return len(series)
+
     async def sync_once(self, venues: set[Venue] | None = None) -> None:
         """Sync the given venues (all when None). The bootstrap sweep passes
         {KALSHI} so looping rotation chunks doesn't re-pull the full Polymarket

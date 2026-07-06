@@ -177,8 +177,11 @@ class PairingLoop:
             reason=str(criteria.get("reason", "")),
         )
 
-    async def run_once(self) -> int:
+    async def run_once(self, llm_budget: int | None = None) -> int:
         """Returns the number of LLM evaluations performed this cycle.
+        ``llm_budget=0`` runs a STRUCTURED-ONLY pass (deterministic matchers
+        still write verdicts; nothing is spent on the LLM) — used by the fast
+        near-resolution priority cycle.
 
         Candidates come from the ACCUMULATED catalog (the markets table filled by
         the rotating series sweeps) — not a single fetch — so every category ever
@@ -221,13 +224,16 @@ class PairingLoop:
                 )
 
         # 3) LLM evaluation for the remainder, budget-capped.
+        budget = self._max_llm_calls if llm_budget is None else llm_budget
         evaluated = 0
-        if not self._engine.configured and llm_queue:
+        if budget == 0:
+            pass  # structured-only pass
+        elif not self._engine.configured and llm_queue:
             _log.warning("pairing_llm_skipped", queued=len(llm_queue),
                          reason="llm_not_configured")
         elif self._engine.configured:
             for c in llm_queue:
-                if evaluated >= self._max_llm_calls:
+                if evaluated >= budget:
                     break
                 if self._registry.find_by_legs(c.kalshi.native_id, c.poly.native_id):
                     continue
