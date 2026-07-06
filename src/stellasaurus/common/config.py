@@ -63,6 +63,12 @@ class Settings(BaseSettings):
     # The ONLY exclusion is structural: parlay collections (KXMVE*) cannot form
     # a clean two-leg locked pair regardless of topic.
     kalshi_series_per_cycle: int = 300  # request budget per catalog cycle
+    # Bootstrap: at startup, loop rotation chunks back-to-back (Kalshi only)
+    # until one full series sweep completes, instead of waiting ~6h of cycles.
+    kalshi_bootstrap_sweep: bool = True
+
+    # --- feed re-planning ---
+    subscription_check_seconds: int = 30  # registry-change poll for feed re-plan
 
     # --- dashboard ---
     # Reachability. "tailnet" (default) binds loopback + this host's Tailscale IP

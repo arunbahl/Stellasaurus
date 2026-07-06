@@ -65,6 +65,9 @@ class SubscriptionManager:
 
     def plan(self) -> list[PlannedFeed]:
         snapshot = self._store.registry()
+        # Rebuilt from scratch each plan so re-plans don't accumulate stale routes.
+        self._maps[Venue.KALSHI] = {}
+        self._maps[Venue.POLYMARKET] = {}
         kalshi_ids: list[str] = []
         poly_ids: list[str] = []
         for pair_id in snapshot.verified:

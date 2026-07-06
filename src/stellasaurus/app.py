@@ -18,12 +18,14 @@ from dotenv import load_dotenv
 
 from stellasaurus.background.catalog_sync import CatalogSync
 from stellasaurus.background.equivalence import EquivalenceEngine
+from stellasaurus.background.feed_manager import FeedManager
 from stellasaurus.background.pairing import PairingLoop
 from stellasaurus.background.registry_loader import RegistryLoader
 from stellasaurus.background.scheduler import TaskSupervisor
 from stellasaurus.background.subscription_mgr import SubscriptionManager
 from stellasaurus.common.config import Settings, load_settings
 from stellasaurus.common.logging import configure_logging, get_logger
+from stellasaurus.common.types import Venue
 from stellasaurus.control.app import create_app
 from stellasaurus.control.net import resolve_bind_hosts
 from stellasaurus.control.readmodel import ReadModel
@@ -110,9 +112,6 @@ async def run(settings: Settings | None = None) -> None:
         loader.load_seed()
         await loader.resolve_seed_markets(clients)
 
-        # Plan + run feeds for the now-VERIFIED pairs.
-        planned = sub_mgr.plan()
-
         # --- read model ---
         read_model = ReadModel(store)
         read_model.feed_stats_provider = sub_mgr.feed_stats
@@ -124,8 +123,32 @@ async def run(settings: Settings | None = None) -> None:
 
         # --- supervise ---
         supervisor = TaskSupervisor()
-        for p in planned:
-            supervisor.supervise(f"feed:{p.feed.stats.venue.value}", p.runner)
+
+        # Feeds are owned by the FeedManager, which re-plans them whenever the
+        # verified pair set changes (pairs verified later stream without restart).
+        feed_mgr = FeedManager(
+            store=store, sub_mgr=sub_mgr,
+            check_interval_s=settings.subscription_check_seconds,
+        )
+        supervisor.supervise("feed_manager", feed_mgr.run)
+
+        # Catalog: optional bootstrap loops Kalshi rotation chunks back-to-back
+        # until one full series sweep completes, then periodic chunks keep it
+        # fresh. Polymarket is synced once per periodic cycle only.
+        kalshi_client = clients[Venue.KALSHI]
+
+        async def catalog_bootstrap() -> None:
+            if not settings.kalshi_bootstrap_sweep:
+                return
+            for _ in range(80):  # safety bound (~11k series / chunk size)
+                await catalog.sync_once(venues={Venue.KALSHI})
+                swept, total = getattr(kalshi_client, "rotation", (0, 0))
+                if total and swept >= total:
+                    _log.info("catalog_bootstrap_complete", series=total)
+                    return
+            _log.warning("catalog_bootstrap_capped")
+
+        supervisor.supervise_once("catalog_bootstrap", catalog_bootstrap)
         supervisor.run_periodic(
             "catalog_sync", settings.catalog_refresh_seconds, catalog.sync_once
         )
@@ -178,7 +201,7 @@ async def run(settings: Settings | None = None) -> None:
             hosts=hosts,
             port=settings.dashboard_port,
             verified_pairs=len(store.registry().verified),
-            feeds=len(planned),
+            bootstrap=settings.kalshi_bootstrap_sweep,
         )
         try:
             await asyncio.gather(*(s.serve() for s in servers))

@@ -68,6 +68,12 @@ class KalshiClient(VenueClient):
             raw=raw,
         )
 
+    @property
+    def rotation(self) -> tuple[int, int]:
+        """(series swept so far, total series) for the current rotation pass.
+        (0, 0) before the first sweep populates the series list."""
+        return (self._series_offset, len(self._series_rotation))
+
     async def list_series_tickers(self) -> list[str]:
         """ALL series tickers — no category filtering; every series is eligible.
 

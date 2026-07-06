@@ -20,6 +20,19 @@ class TaskSupervisor:
         """Run ``factory()`` forever, restarting with capped backoff on failure."""
         self._tasks.append(asyncio.create_task(self._run_forever(name, factory), name=name))
 
+    def supervise_once(self, name: str, job: Callable[[], Awaitable[None]]) -> None:
+        """Run ``job()`` a single time in the background (errors logged, no restart)."""
+
+        async def _once() -> None:
+            try:
+                await job()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                _log.warning("oneshot_failed", task=name, error=str(exc))
+
+        self._tasks.append(asyncio.create_task(_once(), name=name))
+
     def run_periodic(
         self, name: str, interval_s: float, job: Callable[[], Awaitable[None]]
     ) -> None:

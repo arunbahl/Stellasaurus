@@ -43,8 +43,13 @@ class CatalogSync:
         self.last_sync_ms: int | None = None
         self.last_counts: dict[str, int] = {}
 
-    async def sync_once(self) -> None:
+    async def sync_once(self, venues: set[Venue] | None = None) -> None:
+        """Sync the given venues (all when None). The bootstrap sweep passes
+        {KALSHI} so looping rotation chunks doesn't re-pull the full Polymarket
+        catalog every iteration."""
         for venue, client in self._clients.items():
+            if venues is not None and venue not in venues:
+                continue
             try:
                 markets = await client.list_markets()
             except Exception as exc:  # noqa: BLE001 - one venue failing must not abort
