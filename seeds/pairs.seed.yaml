@@ -10,19 +10,44 @@
 #
 # In Phase 2 these rows are produced (and continuously re-verified) by the
 # Fireworks + BAML acceptance-criteria engine with source=LLM. For now they are
-# source=MANUAL_SEED and status=VERIFIED purely on the author's assertion.
+# source=MANUAL_SEED and status=VERIFIED on the author's assertion.
 #
-# NOTE: the tickers/slugs below are EXAMPLES. Replace with real, currently-listed
-# markets before running the live smoke test.
+# NOTE: NYC-high-temperature pairs are DAILY markets — they resolve each night
+# (~05:00Z) and new tickers/slugs list for the next day. Update the date in both
+# ids to refresh, until the Phase-2 pairing loop automates this.
 
 pairs:
-  - pair_id: example-btc-100k-2026
-    canonical_proposition: "Bitcoin reaches $100,000 before the contract's resolution date"
-    kalshi_ticker: KXBTC-26-100K
-    poly_market_slug: btc-100k
+  # Both venues settle on the SAME source: highest temperature recorded at
+  # Central Park (KNYC), New York for 2026-07-05, per the National Weather
+  # Service Climatological Report (Daily).
+  #
+  # Kalshi T84 resolves YES if the high is "less than 84°"; Polymarket lt84f
+  # resolves YES if the high is "less than or equal to 83F". NWS reports whole
+  # degrees, so <84 and <=83 are the same set of outcomes -> equivalent, DIRECT.
+  - pair_id: nyc-high-temp-le83-2026-07-05
+    canonical_proposition: >-
+      NYC Central Park (KNYC) high temperature for 2026-07-05, per the NWS
+      Climatological Report (Daily), is 83°F or below
+    kalshi_ticker: KXHIGHNY-26JUL05-T84
+    poly_market_slug: tc-temp-nychigh-2026-07-05-lt84f
     outcome_polarity: DIRECT
     status: VERIFIED
     acceptance_criteria_note: >-
-      Both resolve YES if BTC trades at or above $100,000 on the referenced
-      index before the stated cutoff. CONFIRM settlement source + cutoff match
-      before trading.
+      Same station (Central Park/KNYC), same source (NWS Climatological Report
+      Daily), same date. Kalshi "<84°" == Polymarket "<=83F" under integer NWS
+      reporting. Close times 04:59Z vs 05:00Z (immaterial: both after the
+      observation day ends).
+
+  # Same family, 86-87°F bracket: Kalshi B86.5 "86° to 87°" vs Polymarket
+  # "between 86F and 87F". Thin books (unlikely outcome today) but equivalent.
+  - pair_id: nyc-high-temp-86-87-2026-07-05
+    canonical_proposition: >-
+      NYC Central Park (KNYC) high temperature for 2026-07-05, per the NWS
+      Climatological Report (Daily), is 86°F or 87°F
+    kalshi_ticker: KXHIGHNY-26JUL05-B86.5
+    poly_market_slug: tc-temp-nychigh-2026-07-05-gte86lt87f
+    outcome_polarity: DIRECT
+    status: VERIFIED
+    acceptance_criteria_note: >-
+      Same station/source/date as the pair above; both brackets cover exactly
+      {86, 87} under integer NWS reporting.
