@@ -49,6 +49,7 @@ class LiveExecutionEngine:
         clock: Clock | None = None,
         requote: object | None = None,  # async (intent) -> (vy, vn) micros or None
         halt: object | None = None,  # (reason: str) -> None, called on a hanging leg
+        flattener: object | None = None,  # .enqueue(NakedLeg) auto-flatten sink
     ) -> None:
         self._state = state
         self._positions = positions
@@ -57,6 +58,7 @@ class LiveExecutionEngine:
         self._clock = clock or SystemClock()
         self._requote = requote
         self._halt = halt
+        self._flattener = flattener
         self._queue: asyncio.Queue[TradeIntent] = asyncio.Queue(maxsize=64)
         self._counter = 0
 
@@ -214,6 +216,14 @@ class LiveExecutionEngine:
             )
             if self._halt is not None:
                 self._halt("hanging_leg")  # type: ignore[operator]
+            if self._flattener is not None:
+                # Hand the naked leg to the background flattener: it owns the
+                # position until the venue reports flat. Halt (above) blocks new
+                # entries meanwhile; resume stays manual by design.
+                from stellasaurus.background.flattener import NakedLeg
+                self._flattener.enqueue(  # type: ignore[attr-defined]
+                    NakedLeg(venue=filled_venue, native_id=native)
+                )
             _log.error("live_unwind_FAILED_HANGING_leg_HALTING", pair_id=intent.pair_id,
                        venue=filled_venue.value, side=filled_side.value,
                        native_id=native, qty=intent.qty)

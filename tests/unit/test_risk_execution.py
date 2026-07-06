@@ -247,3 +247,59 @@ async def test_auto_halt_on_all_pairs_stale():
     clock.t_ms += 60_000  # stale for > threshold
     await hc.watch_once()
     assert store.limits().halted is True
+
+async def test_live_engine_hanging_leg_halts_and_enqueues(tmp_path):
+    """One leg fills, the unwind can NEVER fill -> HANGING + halt + enqueue."""
+    from stellasaurus.background.flattener import NakedLeg
+    from stellasaurus.background.live_execution import LiveExecutionEngine
+    from stellasaurus.common.types import OutcomePolarity, PairSource, PairStatus
+    from stellasaurus.hot_path.positions import PositionsStore
+    from stellasaurus.hot_path.seams import TradeIntent
+    from stellasaurus.hot_path.snapshot import (
+        LimitsSnapshot,
+        PairRegistryEntry,
+        RegistrySnapshot,
+    )
+    from stellasaurus.hot_path.state import HotStateStore
+    from stellasaurus.venues.orders import OrderResult
+
+    class ScriptedGateway:
+        def __init__(self, venue, fill_first):
+            self.venue = venue
+            self._fill_first = fill_first
+            self._n = 0
+
+        async def buy_fok(self, *, native_id, side, qty, limit_price_micros, polarity):
+            self._n += 1
+            # first call (entry) fills iff fill_first; all unwind calls miss
+            filled = qty if (self._n == 1 and self._fill_first) else 0
+            return OrderResult(self.venue, native_id, side, qty, filled,
+                               500_000 if filled else None, 0, "oid", {})
+
+    entry = PairRegistryEntry("p", "P", "KX", "slug", OutcomePolarity.DIRECT,
+                              PairStatus.VERIFIED, 10**13, None, 0, "fp", PairSource.STRUCTURED)
+    store = HotStateStore(
+        registry=RegistrySnapshot.build(1, [entry], now_ms=0),
+        limits=LimitsSnapshot(1, False, 0, 0.0, 1, 10**8, 10**9, 10**12, 10, 10**12, 0.5),
+        book_staleness_ms=60_000,
+    )
+    halts, enq = [], []
+    positions = PositionsStore()
+    engine = LiveExecutionEngine(
+        state=store, positions=positions,
+        gateways={Venue.KALSHI: ScriptedGateway(Venue.KALSHI, fill_first=True),
+                  Venue.POLYMARKET: ScriptedGateway(Venue.POLYMARKET, fill_first=False)},
+        slippage_tolerance_bips=50,
+        halt=lambda reason: halts.append(reason),
+        flattener=type("F", (), {"enqueue": lambda self, leg: enq.append(leg)})(),
+    )
+    intent = TradeIntent(pair_id="p", orientation="A", qty=1,
+                         yes_venue=Venue.KALSHI, no_venue=Venue.POLYMARKET,
+                         vwap_yes_micros=500_000, vwap_no_micros=490_000,
+                         net_edge_micros=10_000, created_mono_ns=0)
+    await engine._execute(intent)
+    assert halts == ["hanging_leg"]
+    assert len(enq) == 1 and isinstance(enq[0], NakedLeg)
+    assert enq[0].venue is Venue.KALSHI  # the leg that actually filled
+    recorded = positions.open_positions()
+    assert len(recorded) == 1 and recorded[0].hedge_status is HedgeStatus.HANGING

@@ -157,15 +157,23 @@ async def run(settings: Settings | None = None) -> None:
         halt = HaltController(
             store=store, positions=positions_store, audit_repo=audit_repo,
         )
+        live_flattener = None  # set when the live path wires an auto-flattener
         if settings.live_trading_enabled:
             # Phase 6 go-live path — refuses to wire unless BOTH venues have
             # credentials. Gateways are additionally self-gated per submit.
             if settings.kalshi_credentials_present and settings.poly_credentials_present:
+                from stellasaurus.background.flattener import PositionFlattener
                 from stellasaurus.background.live_execution import LiveExecutionEngine
                 from stellasaurus.hot_path.book import walk_book_for_size
                 from stellasaurus.venues.orders import (
                     KalshiOrderGateway,
                     PolymarketOrderGateway,
+                )
+
+                kalshi_gw = KalshiOrderGateway(settings, http)
+                poly_gw = PolymarketOrderGateway(settings, http)
+                flattener = PositionFlattener(
+                    gateways={Venue.KALSHI: kalshi_gw, Venue.POLYMARKET: poly_gw}
                 )
 
                 async def _requote(intent):  # noqa: ANN001, ANN202
@@ -187,17 +195,16 @@ async def run(settings: Settings | None = None) -> None:
 
                 live_engine = LiveExecutionEngine(
                     state=store, positions=positions_store,
-                    gateways={
-                        Venue.KALSHI: KalshiOrderGateway(settings, http),
-                        Venue.POLYMARKET: PolymarketOrderGateway(settings, http),
-                    },
+                    gateways={Venue.KALSHI: kalshi_gw, Venue.POLYMARKET: poly_gw},
                     slippage_tolerance_bips=settings.slippage_tolerance_bips,
                     requote=_requote,
                     halt=lambda reason: halt.set_halted(
                         True, actor="live_execution", reason=reason
                     ),
+                    flattener=flattener,
                 )
                 executor = live_engine  # type: ignore[assignment]
+                live_flattener = flattener  # supervised after the supervisor exists
                 _log.warning("LIVE_TRADING_ENABLED", note="real orders will be placed")
             else:
                 _log.error(
@@ -374,6 +381,8 @@ async def run(settings: Settings | None = None) -> None:
         )
         if settings.live_trading_enabled and hasattr(executor, "run"):
             supervisor.supervise("live_execution", executor.run)
+        if live_flattener is not None:
+            supervisor.supervise("flattener", live_flattener.run)
 
         hosts = resolve_bind_hosts(settings.dashboard_expose, settings.dashboard_host)
         servers = []

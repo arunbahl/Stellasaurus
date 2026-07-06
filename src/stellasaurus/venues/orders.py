@@ -26,6 +26,7 @@ remain to be exercised by the first marketable order (Stage 2).
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from dataclasses import dataclass
 from typing import Any, Protocol
@@ -39,6 +40,11 @@ from stellasaurus.common.types import Micros, OutcomePolarity, Side, Venue
 from stellasaurus.venues.signing import KalshiSigner, PolymarketSigner
 
 _log = get_logger("venues.orders")
+
+# Poll budget for Polymarket fill settlement (read-your-write lag). A FOK is
+# terminal server-side fast; ~1.5s covers propagation without stalling misses.
+_POLL_ATTEMPTS = 10
+_POLL_INTERVAL_S = 0.15
 
 _CENT = 10_000  # micros
 
@@ -152,6 +158,49 @@ class KalshiOrderGateway:
             order_id=raw.get("order_id"), raw=raw,
         )
 
+    async def net_position(self, native_id: str) -> int:
+        """Authoritative signed position from the venue: +N long YES, -N net NO.
+        The source of truth for flattening — never trust our own record."""
+        path = "/trade-api/v2/portfolio/positions"
+        h = self._signer.headers(timestamp_ms=wall_ms(), method="GET", path=path)
+        r = await self._http.get(f"{self._base}/portfolio/positions", headers=h)
+        r.raise_for_status()
+        for mp in r.json().get("market_positions", []):
+            if mp.get("ticker") == native_id:
+                return int(round(float(mp.get("position", 0))))
+        return 0
+
+    async def close_position(self, native_id: str) -> int:
+        """Reduce-only marketable IOC to flatten. Returns the residual implied by
+        the order's OWN fill (net - filled), NOT a portfolio re-read: position
+        reads lag writes, and a stale "still open" read would make us sell again
+        and open a naked short. reduce_only additionally guarantees an order can
+        never OPEN exposure on the venue side."""
+        if not self._enabled:
+            raise LiveGateDisabledError("live_trading_enabled is false")
+        net = await self.net_position(native_id)
+        if net == 0:
+            return 0
+        book_side = "ask" if net > 0 else "bid"
+        price = "0.0100" if net > 0 else "0.9900"  # cross to the far touch
+        body = {
+            "ticker": native_id, "client_order_id": f"flat-{uuid.uuid4().hex[:12]}",
+            "side": book_side, "count": f"{abs(net)}.00", "price": price,
+            "time_in_force": "immediate_or_cancel",
+            "self_trade_prevention_type": "taker_at_cross", "reduce_only": True,
+        }
+        path = "/trade-api/v2/portfolio/events/orders"
+        h = self._signer.headers(timestamp_ms=wall_ms(), method="POST", path=path)
+        r = await self._http.post(
+            f"{self._base}/portfolio/events/orders", json=body, headers=h
+        )
+        # 409 insufficient volume == nothing crossed; full position still stands.
+        if r.status_code == 409:
+            return net
+        r.raise_for_status()
+        filled = int(float(r.json().get("order", r.json()).get("fill_count") or 0))
+        return net - filled if net > 0 else net + filled
+
 
 class PolymarketOrderGateway:
     """POST /v1/orders — Ed25519-signed. Intents map canonical side via polarity."""
@@ -221,9 +270,16 @@ class PolymarketOrderGateway:
     async def _settle(
         self, order_id: str | None, create_raw: dict[str, Any]
     ) -> tuple[int, Micros | None, Micros | None]:
-        """Authoritative fill via order lookup (cumQuantity). Returns
-        (filled_qty, avg_price_micros, fees_micros). A FOK either fully fills or
-        is killed, so the immediate post-submit lookup is final."""
+        """Authoritative fill via order lookup. Returns (filled_qty,
+        avg_price_micros, fees_micros).
+
+        Two validated realities force a POLL here, not a single read:
+          * the create response's `executions` is empty even on a full fill;
+          * the order lookup has READ-YOUR-WRITE LAG — an immediate GET can still
+            show cumQuantity 0 for an order that filled (a single read unwound
+            the wrong leg live on 2026-07-06).
+        A FOK is terminal server-side almost immediately, so we poll the order
+        until it reports terminal (leavesQuantity 0) or the budget expires."""
         def parse_execs(execs: list[dict[str, Any]]) -> tuple[float, float, float]:
             f = n = c = 0.0
             for ex in execs:
@@ -237,19 +293,23 @@ class PolymarketOrderGateway:
                 c += comv
             return f, n, c
 
-        # Prefer the create response's executions if it (ever) carries them.
         filled, notional, fees = parse_execs(create_raw.get("executions") or [])
         order: dict[str, Any] = {}
         if order_id is not None:
-            try:
-                lp = f"/v1/order/{order_id}"
-                h = self._signer.headers(timestamp_ms=wall_ms(), method="GET", path=lp)
-                rr = await self._http.get(f"{self._base}{lp}", headers=h)
-                if rr.status_code == 200:
-                    order = rr.json().get("order", {})
-            except Exception as exc:  # noqa: BLE001
-                _log.warning("poly_order_lookup_failed", order_id=order_id, error=str(exc))
-        # cumQuantity is authoritative; it overrides an empty executions array.
+            lp = f"/v1/order/{order_id}"
+            for _ in range(_POLL_ATTEMPTS):
+                try:
+                    h = self._signer.headers(timestamp_ms=wall_ms(), method="GET", path=lp)
+                    rr = await self._http.get(f"{self._base}{lp}", headers=h)
+                    if rr.status_code == 200:
+                        order = rr.json().get("order", {})
+                        leaves = order.get("leavesQuantity")
+                        # terminal: nothing left working -> cumQuantity is final
+                        if leaves is not None and float(leaves) == 0:
+                            break
+                except Exception as exc:  # noqa: BLE001
+                    _log.warning("poly_order_lookup_failed", order_id=order_id, error=str(exc))
+                await asyncio.sleep(_POLL_INTERVAL_S)
         cum = order.get("cumQuantity")
         if cum is not None:
             filled = float(cum)
@@ -269,6 +329,40 @@ class PolymarketOrderGateway:
             f"{self._base}{path}", json={"marketSlug": native_id}, headers=headers
         )
         return r.status_code == 200
+
+    async def net_position(self, native_id: str) -> int:
+        """Authoritative signed position: +N long YES, -N net NO (short)."""
+        path = "/v1/portfolio/positions"
+        headers = self._signer.headers(timestamp_ms=wall_ms(), method="GET", path=path)
+        r = await self._http.get(f"{self._base}{path}", headers=headers)
+        r.raise_for_status()
+        p = r.json().get("positions", {}).get(native_id)
+        return int(round(float(p.get("netPosition", 0)))) if p else 0
+
+    async def close_position(self, native_id: str) -> int:
+        """Marketable IOC to flatten. Long YES -> SELL_LONG@0.01; net NO ->
+        BUY_LONG@0.99 to cover. Residual is derived from the close order's OWN
+        fill (polled via _settle), NOT a portfolio re-read — position reads lag
+        writes, and a stale read would make us sell again into a naked short."""
+        if not self._enabled:
+            raise LiveGateDisabledError("live_trading_enabled is false")
+        net = await self.net_position(native_id)
+        if net == 0:
+            return 0
+        intent = "ORDER_INTENT_SELL_LONG" if net > 0 else "ORDER_INTENT_BUY_LONG"
+        price = "0.0100" if net > 0 else "0.9900"  # cross to the far touch
+        body = {
+            "marketSlug": native_id, "clientOrderId": f"flat-{uuid.uuid4().hex[:12]}",
+            "intent": intent, "type": "ORDER_TYPE_LIMIT",
+            "tif": "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL",
+            "quantity": str(abs(net)), "price": {"value": price, "currency": "USD"},
+        }
+        path = "/v1/orders"
+        headers = self._signer.headers(timestamp_ms=wall_ms(), method="POST", path=path)
+        r = await self._http.post(f"{self._base}{path}", json=body, headers=headers)
+        r.raise_for_status()
+        filled, _, _ = await self._settle(r.json().get("id"), r.json())
+        return net - filled if net > 0 else net + filled
 
 
 def _dollars_to_micros_safe(value: Any) -> Micros | None:
