@@ -1,14 +1,21 @@
 """Real order gateways (Phase 6) — HARD-GATED behind ``live_trading_enabled``.
 
-⚠️  UNVALIDATED: request/response field names follow each venue's documentation
-and prior research but have NOT been exercised against a demo/sandbox or live
-account. Before any live use: run Kalshi's demo environment and a minimal
-Polymarket order, and reconcile the response shapes. Every submit is refused
-unless ``live_trading_enabled`` is true — and the composition root additionally
-never wires these unless that flag is set, so the gate is double-layered.
+✅ SHAPES VALIDATED LIVE (2026-07-06, Stage-1 unmarketable-FOK probes on both
+production venues, zero fills, zero cost):
+  * Kalshi V2: POST /portfolio/events/orders, single-book bid/ask semantics,
+    fixed-point string count/price; unmarketable FOK -> 409
+    fill_or_kill_insufficient_resting_volume (treated as clean zero-fill).
+  * Polymarket: POST /v1/orders with intent/tif/price(Amount)/quantity;
+    response {id, executions[]}; killed FOK never persists; cancel is
+    POST /v1/order/{id}/cancel. NOTE: timeInForce/limitPrice field names are
+    silently IGNORED by the API (order rests as DAY) — a validated footgun.
 
-Both gateways implement ``OrderGateway``: place a single FOK limit BUY for a
-canonical side, returning a normalized ``OrderResult``.
+Every submit is refused unless ``live_trading_enabled`` is true — and the
+composition root additionally never wires these unless that flag is set, so the
+gate is double-layered. Both gateways implement ``OrderGateway``: place a
+single FOK limit BUY for a canonical side, returning a normalized
+``OrderResult``. Fill-path fields (executions parsing, average_fill_price)
+remain to be exercised by the first marketable order (Stage 2).
 """
 
 from __future__ import annotations
@@ -59,7 +66,7 @@ class LiveGateDisabledError(RuntimeError):
 
 
 class KalshiOrderGateway:
-    """POST /portfolio/orders — RSA-signed. Prices are integer cents."""
+    """Kalshi V2 orders — RSA-signed, single-book bid/ask, fixed-point strings."""
 
     venue = Venue.KALSHI
 
@@ -78,33 +85,50 @@ class KalshiOrderGateway:
         self, *, native_id: str, side: Side, qty: int, limit_price_micros: Micros,
         polarity: OutcomePolarity,
     ) -> OrderResult:
+        """V2 single-book semantics (validated live 2026-07-06): ``side`` is
+        bid/ask on the YES leg. Buying canonical YES = bid at p. Buying
+        canonical NO at q = ASK on YES at (1 - q) — selling YES you don't hold
+        mints the NO position at cost q on a crossed event-contract book."""
         if not self._enabled:
             raise LiveGateDisabledError("live_trading_enabled is false")
-        # Kalshi orders are in NATIVE side terms; canonical side maps through
-        # polarity (Kalshi is always the canonical reference in our pairs).
-        native_side = side.value.lower()
-        price_cents = max(1, min(99, round(limit_price_micros / 10_000)))
+        if side is Side.YES:
+            book_side, price_micros = "bid", limit_price_micros
+        else:
+            book_side, price_micros = "ask", 1_000_000 - limit_price_micros
         body = {
             "ticker": native_id,
             "client_order_id": f"stella-{uuid.uuid4().hex[:16]}",
-            "action": "buy",
-            "side": native_side,
-            "count": qty,
-            "type": "limit",
-            f"{native_side}_price": price_cents,
-            "time_in_force": "fill_or_kill",  # VERIFY against demo before live
+            "side": book_side,
+            "count": f"{qty}.00",
+            "price": f"{price_micros / 1_000_000:.4f}",
+            "time_in_force": "fill_or_kill",
+            "self_trade_prevention_type": "taker_at_cross",
         }
-        path = "/trade-api/v2/portfolio/orders"
+        path = "/trade-api/v2/portfolio/events/orders"
         headers = self._signer.headers(timestamp_ms=wall_ms(), method="POST", path=path)
-        r = await self._http.post(f"{self._base}/portfolio/orders", json=body, headers=headers)
+        r = await self._http.post(
+            f"{self._base}/portfolio/events/orders", json=body, headers=headers
+        )
+        if r.status_code == 409 and "fill_or_kill" in r.text:
+            # Validated live: unmarketable FOK -> 409 insufficient_resting_volume.
+            # That is a clean zero-fill, not a transport error.
+            return OrderResult(
+                venue=self.venue, native_id=native_id, side=side,
+                requested_qty=qty, filled_qty=0, avg_price_micros=None,
+                fees_micros=None, order_id=None, raw=r.json(),
+            )
         r.raise_for_status()
         raw = r.json().get("order", r.json())
-        filled = int(raw.get("filled_count") or raw.get("count_filled") or 0)
+        filled = int(float(raw.get("fill_count") or 0))
+        avg_yes = _dollars_to_micros_safe(raw.get("average_fill_price"))
+        # ask fills report the YES sale price; the NO cost is its complement.
+        avg = avg_yes if side is Side.YES or avg_yes is None else 1_000_000 - avg_yes
+        avg_fee = _dollars_to_micros_safe(raw.get("average_fee_paid"))
         return OrderResult(
             venue=self.venue, native_id=native_id, side=side,
             requested_qty=qty, filled_qty=filled,
-            avg_price_micros=None,  # reconcile from fills feed
-            fees_micros=_dollars_to_micros_safe(raw.get("taker_fees_dollars")),
+            avg_price_micros=avg,
+            fees_micros=(avg_fee * filled) if (avg_fee is not None and filled) else None,
             order_id=raw.get("order_id"), raw=raw,
         )
 
@@ -139,33 +163,59 @@ class PolymarketOrderGateway:
         intent = "ORDER_INTENT_BUY_LONG" if native_long else "ORDER_INTENT_BUY_SHORT"
         # A BUY_SHORT limit price is quoted in SHORT terms (1 - long price).
         price = limit_price_micros if native_long else 1_000_000 - limit_price_micros
+        # Field names VALIDATED live 2026-07-06: intent, tif, price (Amount),
+        # quantity string. timeInForce/limitPrice are silently IGNORED (an
+        # order defaults to DAY and rests) — never reintroduce them.
         body = {
             "marketSlug": native_id,
             "clientOrderId": f"stella-{uuid.uuid4().hex[:16]}",
-            "orderIntent": intent,
+            "intent": intent,
             "type": "ORDER_TYPE_LIMIT",
-            "timeInForce": "TIME_IN_FORCE_FILL_OR_KILL",  # VERIFY before live
+            "tif": "TIME_IN_FORCE_FILL_OR_KILL",
             "quantity": str(qty),
-            "limitPrice": {"value": f"{price / 1_000_000:.4f}", "currency": "USD"},
+            "price": {"value": f"{price / 1_000_000:.4f}", "currency": "USD"},
         }
         path = "/v1/orders"
         headers = self._signer.headers(timestamp_ms=wall_ms(), method="POST", path=path)
         r = await self._http.post(f"{self._base}{path}", json=body, headers=headers)
         r.raise_for_status()
-        raw = r.json().get("order", r.json())
-        filled = int(float(raw.get("cumQuantity") or 0))
-        avg = raw.get("avgPx", {})
-        avg_micros = _dollars_to_micros_safe(avg.get("value") if isinstance(avg, dict) else avg)
-        fees = raw.get("commissionNotionalTotalCollected", {})
+        raw = r.json()
+        # Response shape (validated): {"id": ..., "executions": [...]}. A killed
+        # FOK returns executions=[] and the order does not persist.
+        executions = raw.get("executions") or []
+        filled = 0
+        notional = 0.0
+        fees = 0.0
+        for ex in executions:
+            q = float(ex.get("quantity") or ex.get("qty") or 0)
+            px = ex.get("price") or ex.get("px") or {}
+            pxv = float(px.get("value") if isinstance(px, dict) else px or 0)
+            com = ex.get("commission") or ex.get("commissionNotional") or {}
+            comv = float(com.get("value") if isinstance(com, dict) else com or 0)
+            filled += q
+            notional += q * pxv
+            fees += comv
+        filled_int = int(filled)
+        avg_micros = int(round(notional / filled * 1_000_000)) if filled else None
+        # native short fills are priced in short terms; convert back to canonical
+        if avg_micros is not None and not native_long:
+            avg_micros = 1_000_000 - avg_micros
         return OrderResult(
             venue=self.venue, native_id=native_id, side=side,
-            requested_qty=qty, filled_qty=filled,
+            requested_qty=qty, filled_qty=filled_int,
             avg_price_micros=avg_micros,
-            fees_micros=_dollars_to_micros_safe(
-                fees.get("value") if isinstance(fees, dict) else fees
-            ),
-            order_id=raw.get("id") or raw.get("orderId"), raw=raw,
+            fees_micros=int(round(fees * 1_000_000)) if executions else None,
+            order_id=raw.get("id"), raw=raw,
         )
+
+    async def cancel(self, *, order_id: str, native_id: str) -> bool:
+        """POST /v1/order/{id}/cancel (validated live). True on 200."""
+        path = f"/v1/order/{order_id}/cancel"
+        headers = self._signer.headers(timestamp_ms=wall_ms(), method="POST", path=path)
+        r = await self._http.post(
+            f"{self._base}{path}", json={"marketSlug": native_id}, headers=headers
+        )
+        return r.status_code == 200
 
 
 def _dollars_to_micros_safe(value: Any) -> Micros | None:
