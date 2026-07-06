@@ -45,7 +45,14 @@ class ReadModel:
             }
             for f in registry_freshness(self._store)
         ]
-        return {"feeds": feeds, "freshness": freshness}
+        latency_provider = getattr(self, "latency_provider", None)
+        latency = [
+            {"stage": x.stage, "count": x.count, "avg_us": round(x.avg_us, 1),
+             "p50_us": round(x.p50_us, 1), "p95_us": round(x.p95_us, 1),
+             "max_us": round(x.max_us, 1)}
+            for x in (latency_provider() if latency_provider else ())
+        ]
+        return {"feeds": feeds, "freshness": freshness, "latency": latency}
 
     # --- registry ---
     def pairs(self) -> list[dict[str, Any]]:

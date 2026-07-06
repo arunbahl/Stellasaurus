@@ -37,6 +37,7 @@ from stellasaurus.hot_path.evaluator import OpportunityEvaluator
 from stellasaurus.hot_path.execution import PaperExecutionEngine
 from stellasaurus.hot_path.fees import FeeParams
 from stellasaurus.hot_path.ingest import BookStore
+from stellasaurus.hot_path.latency import LatencyRecorder
 from stellasaurus.hot_path.opportunities import OpportunitySink
 from stellasaurus.hot_path.positions import PositionsStore
 from stellasaurus.hot_path.risk import RiskManager
@@ -98,7 +99,8 @@ async def run(settings: Settings | None = None) -> None:
         limits=_limits_from_settings(settings),
         book_staleness_ms=settings.book_staleness_ms,
     )
-    book_store = BookStore(store)
+    latency = LatencyRecorder()
+    book_store = BookStore(store, latency=latency)
 
     async with httpx.AsyncClient(timeout=10.0) as http:
         clients = venue_clients(settings, http)
@@ -149,6 +151,31 @@ async def run(settings: Settings | None = None) -> None:
         halt = HaltController(
             store=store, positions=positions_store, audit_repo=audit_repo,
         )
+        if settings.live_trading_enabled:
+            # Phase 6 go-live path — refuses to wire unless BOTH venues have
+            # credentials. Gateways are additionally self-gated per submit.
+            if settings.kalshi_credentials_present and settings.poly_credentials_present:
+                from stellasaurus.background.live_execution import LiveExecutionEngine
+                from stellasaurus.venues.orders import (
+                    KalshiOrderGateway,
+                    PolymarketOrderGateway,
+                )
+                live_engine = LiveExecutionEngine(
+                    state=store, positions=positions_store,
+                    gateways={
+                        Venue.KALSHI: KalshiOrderGateway(settings, http),
+                        Venue.POLYMARKET: PolymarketOrderGateway(settings, http),
+                    },
+                    slippage_tolerance_bips=settings.slippage_tolerance_bips,
+                )
+                executor = live_engine  # type: ignore[assignment]
+                _log.warning("LIVE_TRADING_ENABLED", note="real orders will be placed")
+            else:
+                _log.error(
+                    "live_trading_requested_but_missing_credentials",
+                    kalshi=settings.kalshi_credentials_present,
+                    poly=settings.poly_credentials_present,
+                )
         evaluator = OpportunityEvaluator(
             state=store, fee_params=fee_params, sink=opp_sink,
             risk_gate=risk, executor=executor,
@@ -220,6 +247,7 @@ async def run(settings: Settings | None = None) -> None:
         read_model.positions_store = positions_store
         read_model.risk_manager = risk
         read_model.pnl_totals_provider = pnl_repo.totals
+        read_model.latency_provider = latency.snapshot
         read_model.feed_stats_provider = sub_mgr.feed_stats
         read_model.catalog_stats_provider = lambda: {
             "counts": catalog.last_counts,
@@ -274,6 +302,8 @@ async def run(settings: Settings | None = None) -> None:
         supervisor.run_periodic(
             "fee_sync", settings.fee_param_refresh_seconds, fee_sync.sync_once
         )
+        if settings.live_trading_enabled and hasattr(executor, "run"):
+            supervisor.supervise("live_execution", executor.run)
 
         # Phase 2 pairing loop: candidates -> LLM verdicts -> registry (source=LLM).
         engine = EquivalenceEngine()

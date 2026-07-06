@@ -10,18 +10,21 @@ GO-REWRITABLE BOUNDARY: stdlib + ``common`` + sibling hot_path modules only.
 
 from __future__ import annotations
 
+import time
 from collections.abc import Callable
 
 from stellasaurus.hot_path.book import NormalizedBook
+from stellasaurus.hot_path.latency import LatencyRecorder
 from stellasaurus.hot_path.state import HotStateStore
 
 BookListener = Callable[[str], None]
 
 
 class BookStore:
-    def __init__(self, store: HotStateStore) -> None:
+    def __init__(self, store: HotStateStore, latency: LatencyRecorder | None = None) -> None:
         self._store = store
         self._listeners: list[BookListener] = []
+        self._latency = latency
 
     def add_listener(self, listener: BookListener) -> None:
         """Register an on-book-update callback. Phase 1 has none; Phase 3 adds
@@ -30,5 +33,12 @@ class BookStore:
 
     def update(self, book: NormalizedBook) -> None:
         self._store.publish_book(book)
+        if self._latency is None:
+            for listener in self._listeners:
+                listener(book.pair_id)
+            return
+        start = time.monotonic_ns()
+        self._latency.record("ingest_lag", start - book.recv_mono_ns)
         for listener in self._listeners:
             listener(book.pair_id)
+        self._latency.record("eval", time.monotonic_ns() - start)
