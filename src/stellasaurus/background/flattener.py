@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+from typing import Protocol
 
 from stellasaurus.common.clock import Clock, SystemClock
 from stellasaurus.common.logging import get_logger
@@ -30,13 +31,14 @@ _log = get_logger("background.flattener")
 class NakedLeg:
     venue: Venue
     native_id: str
+    pair_id: str | None = None  # risk reservation to release once confirmed flat
 
 
-class _Closer:
+class _Closer(Protocol):
     """Structural type for the gateway methods the flattener needs."""
 
-    async def net_position(self, native_id: str) -> int: ...  # noqa: D102
-    async def close_position(self, native_id: str) -> int: ...  # noqa: D102
+    async def net_position(self, native_id: str) -> int: ...
+    async def close_position(self, native_id: str) -> int: ...
 
 
 class PositionFlattener:
@@ -47,11 +49,13 @@ class PositionFlattener:
         max_attempts: int = 8,
         backoff_seconds: float = 2.0,
         clock: Clock | None = None,
+        on_release: object | None = None,  # (pair_id) -> None, frees risk slot when flat
     ) -> None:
         self._gateways = gateways
         self._max_attempts = max_attempts
         self._backoff = backoff_seconds
         self._clock = clock or SystemClock()
+        self._on_release = on_release
         self._queue: asyncio.Queue[NakedLeg] = asyncio.Queue()
 
     def enqueue(self, leg: NakedLeg) -> None:
@@ -80,11 +84,17 @@ class PositionFlattener:
             if residual == 0:
                 _log.warning("flatten_success", venue=leg.venue.value,
                              native_id=leg.native_id, attempts=attempt)
+                # Leg is confirmed flat -> now safe to free the risk reservation
+                # the engine deliberately retained for a HANGING pair.
+                if self._on_release is not None and leg.pair_id is not None:
+                    self._on_release(leg.pair_id)  # type: ignore[operator]
                 return True
             _log.warning("flatten_residual", venue=leg.venue.value,
                          native_id=leg.native_id, residual=residual, attempt=attempt)
             if attempt < self._max_attempts:
                 await asyncio.sleep(self._backoff)
+        # Budget exhausted, leg STILL naked -> keep the reservation (pair stays
+        # blocked + counted) and stay halted. A human must resolve.
         _log.error("flatten_EXHAUSTED_still_naked", venue=leg.venue.value,
-                   native_id=leg.native_id)
+                   native_id=leg.native_id, pair_id=leg.pair_id)
         return False

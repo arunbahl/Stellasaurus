@@ -111,3 +111,69 @@ async def test_hanging_chain_end_to_end(tmp_path):
     await asyncio.sleep(0)
     worker.cancel()
     assert kalshi_gw.closed >= 1  # the filled (Kalshi) leg was auto-flattened
+
+
+async def test_hanging_retains_reservation_until_flattened(tmp_path):
+    """Finding-1 fix: a HANGING naked leg keeps its risk reservation (pair
+    stays blocked, slot + capital counted) until the flattener confirms flat —
+    NOT released the instant it hangs (which would make it invisible to risk)."""
+    from stellasaurus.hot_path.risk import RiskManager
+    from stellasaurus.hot_path.seams import TradeIntent
+
+    db = Database(tmp_path / "t.db")
+    db.migrate()
+    positions = PositionsStore()
+    entry = PairRegistryEntry("p", "P", "K", "s", OutcomePolarity.DIRECT,
+                              PairStatus.VERIFIED, 10**13, None, 0, "fp",
+                              PairSource.STRUCTURED)
+    # fresh books so the gate's is_fresh passes
+    from stellasaurus.common.types import Venue as V
+    from stellasaurus.hot_path.book import NativeBook, PriceLevel
+    from stellasaurus.hot_path.normalize import normalize
+    store = HotStateStore(
+        registry=RegistrySnapshot.build(1, [entry], now_ms=0),
+        limits=LimitsSnapshot(1, False, 0, 0.0, 1, 10**9, 10**12, 10**12, 1,
+                              10**12, 0.5),
+        book_staleness_ms=10**9,
+    )
+    for v in (V.KALSHI, V.POLYMARKET):
+        nb = NativeBook(v, "K" if v is V.KALSHI else "s",
+                        (PriceLevel(500_000, 100),), (PriceLevel(510_000, 100),),
+                        None, None, 1, 0, 0)
+        store.publish_book(normalize(nb, polarity=OutcomePolarity.DIRECT, pair_id="p"))
+
+    risk = RiskManager(state=store, positions=positions)
+    # gateway that HANGS (entry fills, unwind never), then close succeeds
+    gw = ScriptedGateway(Venue.KALSHI, fill_entry=True)
+    poly = ScriptedGateway(Venue.POLYMARKET, fill_entry=False)
+    flattener = PositionFlattener(
+        gateways={Venue.KALSHI: gw, Venue.POLYMARKET: poly},
+        max_attempts=2, backoff_seconds=0, on_release=risk.release,
+    )
+    engine = LiveExecutionEngine(
+        state=store, positions=positions,
+        gateways={Venue.KALSHI: gw, Venue.POLYMARKET: poly},
+        slippage_tolerance_bips=50,
+        halt=lambda r: None, flattener=flattener, on_release=risk.release,
+    )
+    intent = TradeIntent("p", "A", 1, Venue.KALSHI, Venue.POLYMARKET,
+                         500_000, 490_000, 10_000, 0)
+    # approve reserves the slot, then the worker executes -> HANGING
+    assert risk.approve(intent) is True
+    defer = await engine._execute(intent)
+    assert defer is True  # engine signalled: RETAIN the reservation
+
+    # reservation retained: the pair is still blocked despite HANGING recording
+    # committed=0 and being excluded from has_open
+    assert risk.approve(intent) is False
+    assert risk.decisions()[-1].rejected_by == "pair_already_open"
+
+    # flattener closes the leg -> only THEN is the reservation released
+    worker = asyncio.create_task(flattener.run())
+    for _ in range(50):
+        await asyncio.sleep(0)
+        if gw.closed:
+            break
+    await asyncio.sleep(0)
+    worker.cancel()
+    assert risk.approve(intent) is True  # slot freed after confirmed-flat

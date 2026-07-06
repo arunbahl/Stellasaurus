@@ -174,7 +174,8 @@ async def run(settings: Settings | None = None) -> None:
                 kalshi_gw = KalshiOrderGateway(settings, http)
                 poly_gw = PolymarketOrderGateway(settings, http)
                 flattener = PositionFlattener(
-                    gateways={Venue.KALSHI: kalshi_gw, Venue.POLYMARKET: poly_gw}
+                    gateways={Venue.KALSHI: kalshi_gw, Venue.POLYMARKET: poly_gw},
+                    on_release=risk.release,  # frees a HANGING pair's slot once flat
                 )
 
                 async def _requote(intent):  # noqa: ANN001, ANN202

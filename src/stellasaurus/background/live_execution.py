@@ -81,14 +81,19 @@ class LiveExecutionEngine:
     async def run(self) -> None:
         while True:
             intent = await self._queue.get()
+            defer_release = False
             try:
-                await self._execute(intent)
+                defer_release = await self._execute(intent)
             except Exception as exc:  # noqa: BLE001 - never kill the worker
                 _log.error("live_execution_error", pair_id=intent.pair_id, error=str(exc))
             finally:
-                # Free the risk reservation on EVERY terminal outcome (including
-                # exceptions/requote-aborts) so a slot is never leaked.
-                if self._on_release is not None:
+                # Free the risk reservation on every terminal outcome EXCEPT a
+                # HANGING leg: there a real naked position is live but records
+                # committed=0 and is excluded from has_open, so releasing would
+                # make it invisible to the gate (counted as zero exposure). Keep
+                # the reservation until the flattener confirms the leg is flat;
+                # the flattener owns release for that pair.
+                if self._on_release is not None and not defer_release:
                     self._on_release(intent.pair_id)  # type: ignore[operator]
 
     def _limit(self, price: Micros) -> Micros:
@@ -97,10 +102,13 @@ class LiveExecutionEngine:
         pad = max((price * self._slip_bips) // 10_000, 20_000)
         return price + pad
 
-    async def _execute(self, intent: TradeIntent) -> None:
+    async def _execute(self, intent: TradeIntent) -> bool:
+        """Returns True iff the risk reservation must be RETAINED past this call
+        (a HANGING naked leg the flattener still owns); False for every clean
+        terminal outcome (release the slot)."""
         entry = self._state.registry().by_id.get(intent.pair_id)
         if entry is None:
-            return
+            return False
         self._counter += 1
         position_id = f"live-{intent.pair_id}-{self._clock.wall_ms()}-{self._counter}"
 
@@ -119,7 +127,7 @@ class LiveExecutionEngine:
             fresh = await self._requote(intent)  # type: ignore[operator]
             if fresh is None:
                 _log.warning("live_requote_abort", pair_id=intent.pair_id)
-                return
+                return False
             fresh_vy, fresh_vn = fresh
             if fresh_vy + fresh_vn > intent.vwap_yes_micros + intent.vwap_no_micros + 20_000:
                 _log.warning(
@@ -127,7 +135,7 @@ class LiveExecutionEngine:
                     intent_cost=intent.vwap_yes_micros + intent.vwap_no_micros,
                     fresh_cost=fresh_vy + fresh_vn,
                 )
-                return
+                return False
             intent = TradeIntent(
                 pair_id=intent.pair_id, orientation=intent.orientation,
                 qty=intent.qty, yes_venue=intent.yes_venue, no_venue=intent.no_venue,
@@ -167,7 +175,7 @@ class LiveExecutionEngine:
                 resolves_at_ms=entry.resolves_at_ms,
             ))
             _log.info("live_hedged", pair_id=intent.pair_id, qty=intent.qty)
-            return
+            return False
 
         if not yes_ok and not no_ok:
             self._positions.record(PaperPosition(
@@ -180,7 +188,7 @@ class LiveExecutionEngine:
                 opened_wall_ms=self._clock.wall_ms(),
                 resolves_at_ms=entry.resolves_at_ms,
             ))
-            return
+            return False
 
         # Single leg filled -> forced unwind: sell it back as a marketable
         # order (buy the OPPOSITE side at a crossing price, which nets flat on
@@ -229,11 +237,14 @@ class LiveExecutionEngine:
                 self._halt("hanging_leg")  # type: ignore[operator]
             if self._flattener is not None:
                 # Hand the naked leg to the background flattener: it owns the
-                # position until the venue reports flat. Halt (above) blocks new
-                # entries meanwhile; resume stays manual by design.
+                # position until the venue reports flat, and releases the risk
+                # reservation only then. Halt (above) blocks new entries; the
+                # retained reservation keeps THIS pair blocked and its slot +
+                # capital counted even if halt is later cleared. Resume is manual.
                 from stellasaurus.background.flattener import NakedLeg
                 self._flattener.enqueue(  # type: ignore[attr-defined]
-                    NakedLeg(venue=filled_venue, native_id=native)
+                    NakedLeg(venue=filled_venue, native_id=native,
+                             pair_id=intent.pair_id)
                 )
             _log.error("live_unwind_FAILED_HANGING_leg_HALTING", pair_id=intent.pair_id,
                        venue=filled_venue.value, side=filled_side.value,
@@ -254,3 +265,5 @@ class LiveExecutionEngine:
             opened_wall_ms=self._clock.wall_ms(),
             resolves_at_ms=entry.resolves_at_ms,
         ))
+        # Retain the reservation iff the leg is still naked (HANGING).
+        return not unwound
