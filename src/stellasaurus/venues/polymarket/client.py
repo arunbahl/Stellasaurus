@@ -44,25 +44,40 @@ class PolymarketClient(VenueClient):
         return resp.json()
 
     async def list_markets(self) -> list[RawMarket]:
-        data = await self._get("/v1/markets", params={"limit": 1000})
-        items = data.get("markets", data if isinstance(data, list) else [])
+        # Pagination is OFFSET-based (a `cursor` param is silently ignored, and the
+        # default sort returns the oldest markets first — which is how the frozen
+        # 2025 seed markets masked the live catalog). Filter to open markets.
         markets: list[RawMarket] = []
-        for raw in items:
-            fields = parse.parse_market(raw)
-            if not fields["native_id"]:
-                continue
-            markets.append(
-                RawMarket(
-                    venue=Venue.POLYMARKET,
-                    native_id=fields["native_id"],
-                    title=fields["title"],
-                    rules_text=fields["rules_text"],
-                    settlement_source=fields["settlement_source"],
-                    resolves_at_ms=fields["resolves_at_ms"],
-                    status=fields["status"],
-                    raw=raw,
-                )
+        page_size = 500
+        for page in range(20):  # safety bound
+            data = await self._get(
+                "/v1/markets",
+                params={
+                    "limit": page_size,
+                    "offset": page * page_size,
+                    "active": "true",
+                    "closed": "false",
+                },
             )
+            items = data.get("markets", data if isinstance(data, list) else [])
+            for raw in items:
+                fields = parse.parse_market(raw)
+                if not fields["native_id"]:
+                    continue
+                markets.append(
+                    RawMarket(
+                        venue=Venue.POLYMARKET,
+                        native_id=fields["native_id"],
+                        title=fields["title"],
+                        rules_text=fields["rules_text"],
+                        settlement_source=fields["settlement_source"],
+                        resolves_at_ms=fields["resolves_at_ms"],
+                        status=fields["status"],
+                        raw=raw,
+                    )
+                )
+            if len(items) < page_size:
+                break
         _log.info("listed_markets", count=len(markets))
         return markets
 

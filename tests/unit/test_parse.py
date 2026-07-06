@@ -70,6 +70,21 @@ def test_poly_parse_book_scalar_px():
     assert nb.no_bids is None and nb.no_asks is None
 
 
+def test_poly_parse_book_marketdata_wrapper():
+    # Live REST shape (verified 2026-07-05): book nested under "marketData",
+    # px as an Amount object, fractional qty strings.
+    payload = {
+        "marketData": {
+            "marketSlug": "s",
+            "bids": [{"px": {"value": "0.1020", "currency": "USD"}, "qty": "62.0000"}],
+            "offers": [{"px": {"value": "0.1370", "currency": "USD"}, "qty": "25.0000"}],
+        }
+    }
+    nb = pparse.parse_book(slug="s", payload=payload, seq=1, recv_mono_ns=1, recv_wall_ms=2)
+    assert nb.yes_bids == (PriceLevel(102_000, 62),)
+    assert nb.yes_asks == (PriceLevel(137_000, 25),)
+
+
 def test_poly_parse_book_amount_object_px():
     payload = {"bids": [{"px": {"value": "0.50", "currency": "USD"}, "qty": "2"}], "offers": []}
     nb = pparse.parse_book(slug="s", payload=payload, seq=1, recv_mono_ns=1, recv_wall_ms=2)

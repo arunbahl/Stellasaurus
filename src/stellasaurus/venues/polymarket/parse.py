@@ -80,7 +80,10 @@ def _levels(raw: Any) -> tuple[PriceLevel, ...]:
 def parse_book(
     *, slug: str, payload: dict[str, Any], seq: int, recv_mono_ns: int, recv_wall_ms: int
 ) -> NativeBook:
-    book = payload.get("book", payload) or {}
+    # Live REST shape (verified 2026-07-05): {"marketData": {"marketSlug", "bids":
+    # [{"px": {"value": "0.1020", ...}, "qty": "62.0000"}, ...], "offers": [...]}}.
+    # Fall back to older "book" wrapper or a bare payload.
+    book = payload.get("marketData") or payload.get("book") or payload or {}
     yes_bids = _levels(book.get("bids"))
     yes_asks = _levels(book.get("offers") or book.get("asks"))
     return NativeBook(
