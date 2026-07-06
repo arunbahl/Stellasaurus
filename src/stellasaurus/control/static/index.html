@@ -43,6 +43,15 @@
         <th>Frames</th><th>Reconnects</th><th>Last frame</th></tr></thead><tbody></tbody></table>
     </section>
     <section>
+      <h2>Paper opportunities (fee-adjusted net edge, all gates)</h2>
+      <table id="opps"><thead><tr>
+        <th>Pair</th><th>Orient</th><th>Fire?</th><th>Gate</th><th>Q</th>
+        <th>VWAP yes</th><th>VWAP no</th><th>Fees/pair</th><th>Net edge</th>
+        <th>T (d)</th><th>Ann. ret</th>
+      </tr></thead><tbody></tbody></table>
+      <div id="fired" class="muted" style="margin-top:8px">no paper fires yet</div>
+    </section>
+    <section>
       <h2>Live normalized books (canonical-YES) &amp; display-only gross edge</h2>
       <table id="books"><thead><tr>
         <th>Pair</th><th>Fresh</th>
@@ -107,6 +116,23 @@
         <td class="muted">${p.terms_fingerprint}</td></tr>`).join("");
     }
 
+    function renderOpps(o) {
+      const rows = (o.latest || []).map(x => `
+        <tr><td>${x.pair_id.slice(0,44)}</td><td>${x.orientation}</td>
+        <td>${x.would_fire ? pill("FIRE","ok") : pill("no","bad")}</td>
+        <td>${x.gate_failed || '<span class="muted">—</span>'}</td>
+        <td>${x.qty || ''}</td>
+        <td>${x.vwap_yes || '—'}</td><td>${x.vwap_no || '—'}</td>
+        <td>${x.fees_per_pair || '—'}</td>
+        <td class="${(x.net_edge_micros||0) > 0 ? 'edge-pos' : 'edge-neg'}">${x.net_edge || '—'}</td>
+        <td>${x.t_days ?? '—'}</td><td>${x.annualized_return ?? '—'}</td></tr>`).join("");
+      $("opps").querySelector("tbody").innerHTML = rows;
+      const fired = o.fired || [];
+      $("fired").textContent = fired.length
+        ? `paper fires: ${fired.length} (latest: ${fired[0].pair_id} ${fired[0].orientation} net ${fired[0].net_edge} @ ${fmtTs(fired[0].ts_ms)})`
+        : "no paper fires yet";
+    }
+
     function renderCatalog(c) {
       const counts = c.counts ? Object.entries(c.counts).map(([k,v]) => `${k}: ${v}`).join(" · ") : "no sync yet";
       $("catalog").textContent = `${counts}  |  last sync: ${fmtTs(c.last_sync_ms)}`;
@@ -119,6 +145,7 @@
       ws.onmessage = (ev) => {
         const d = JSON.parse(ev.data);
         renderFeeds(d.health?.feeds || []);
+        renderOpps(d.opportunities || {});
         renderBooks(d.books || [], d.health?.freshness || []);
         renderPairs(d.pairs || []);
         renderCatalog(d.catalog || {});

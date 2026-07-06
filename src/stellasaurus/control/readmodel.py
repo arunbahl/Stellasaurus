@@ -69,6 +69,20 @@ class ReadModel:
     def catalog_stats(self) -> dict[str, Any]:
         return dict(self.catalog_stats_provider())
 
+    # --- paper opportunities (Phase 3) ---
+    def opportunities(self) -> dict[str, Any]:
+        sink = getattr(self, "opportunity_sink", None)
+        if sink is None:
+            return {"latest": [], "fired": []}
+        latest = sorted(
+            sink.latest(),
+            key=lambda o: (not o.would_fire, -(o.net_edge_micros or -10**12)),
+        )
+        return {
+            "latest": [_opp_view(o) for o in latest],
+            "fired": [_opp_view(o) for o in reversed(sink.fired())][:50],
+        }
+
     # --- books ---
     def book_view(self, pair_id: str) -> dict[str, Any]:
         kalshi = self._store.book(pair_id, Venue.KALSHI)
@@ -83,6 +97,30 @@ class ReadModel:
 
     def all_book_views(self) -> list[dict[str, Any]]:
         return [self.book_view(pid) for pid in self._store.registry().verified]
+
+
+def _opp_view(o: Any) -> dict[str, Any]:
+    return {
+        "pair_id": o.pair_id,
+        "orientation": o.orientation,
+        "yes_venue": o.yes_venue.value,
+        "no_venue": o.no_venue.value,
+        "would_fire": o.would_fire,
+        "gate_failed": o.gate_failed,
+        "qty": o.qty,
+        "vwap_yes": micros_to_str(o.vwap_yes_micros) if o.vwap_yes_micros is not None else None,
+        "vwap_no": micros_to_str(o.vwap_no_micros) if o.vwap_no_micros is not None else None,
+        "fees_per_pair": (
+            micros_to_str(o.fees_per_pair_micros) if o.fees_per_pair_micros is not None else None
+        ),
+        "net_edge": micros_to_str(o.net_edge_micros) if o.net_edge_micros is not None else None,
+        "net_edge_micros": o.net_edge_micros,
+        "t_days": round(o.t_days, 2) if o.t_days is not None else None,
+        "annualized_return": (
+            round(o.annualized_return, 3) if o.annualized_return is not None else None
+        ),
+        "ts_ms": o.created_wall_ms,
+    }
 
 
 def _book_side(book: NormalizedBook | None) -> dict[str, Any]:

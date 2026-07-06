@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+from decimal import Decimal
 
 import httpx
 import uvicorn
@@ -29,7 +30,10 @@ from stellasaurus.common.types import Venue
 from stellasaurus.control.app import create_app
 from stellasaurus.control.net import resolve_bind_hosts
 from stellasaurus.control.readmodel import ReadModel
+from stellasaurus.hot_path.evaluator import OpportunityEvaluator
+from stellasaurus.hot_path.fees import FeeParams
 from stellasaurus.hot_path.ingest import BookStore
+from stellasaurus.hot_path.opportunities import OpportunitySink
 from stellasaurus.hot_path.snapshot import LimitsSnapshot, RegistrySnapshot
 from stellasaurus.hot_path.state import HotStateStore
 from stellasaurus.storage.audit_repo import AuditRepo
@@ -112,8 +116,42 @@ async def run(settings: Settings | None = None) -> None:
         loader.load_seed()
         await loader.resolve_seed_markets(clients)
 
+        # --- Phase 3: evaluator + fee engine (paper mode) ---
+        fee_params = FeeParams(
+            kalshi_taker_multiplier=Decimal(str(settings.kalshi_fee_multiplier_default)),
+            kalshi_maker_multiplier=Decimal(str(settings.kalshi_fee_multiplier_default)) / 4,
+            kalshi_precision_micros=settings.kalshi_balance_precision_micros,
+            poly_taker_bps=settings.poly_taker_bps_default,
+            poly_maker_bps=0,
+            poly_min_fee_micros=settings.poly_min_fee_micros,
+        )
+        opp_sink = OpportunitySink()
+        evaluator = OpportunityEvaluator(state=store, fee_params=fee_params, sink=opp_sink)
+        book_store.add_listener(evaluator.on_book_update)
+
+        async def drain_opportunities() -> None:
+            # Hot path never touches disk: fired paper opportunities are drained
+            # to the audit log out of band, and dead pairs pruned from the sink.
+            fired = opp_sink.drain_fired()
+            for o in fired:
+                audit_repo.append(
+                    actor="evaluator",
+                    event_type="PAPER_FIRE",
+                    pair_id=o.pair_id,
+                    detail={
+                        "orientation": o.orientation, "qty": o.qty,
+                        "vwap_yes_micros": o.vwap_yes_micros,
+                        "vwap_no_micros": o.vwap_no_micros,
+                        "fees_per_pair_micros": o.fees_per_pair_micros,
+                        "net_edge_micros": o.net_edge_micros,
+                        "annualized_return": o.annualized_return,
+                    },
+                )
+            opp_sink.prune(frozenset(store.registry().verified))
+
         # --- read model ---
         read_model = ReadModel(store)
+        read_model.opportunity_sink = opp_sink
         read_model.feed_stats_provider = sub_mgr.feed_stats
         read_model.catalog_stats_provider = lambda: {
             "counts": catalog.last_counts,
@@ -152,6 +190,7 @@ async def run(settings: Settings | None = None) -> None:
         supervisor.run_periodic(
             "catalog_sync", settings.catalog_refresh_seconds, catalog.sync_once
         )
+        supervisor.run_periodic("opportunity_drain", 5, drain_opportunities)
 
         # Phase 2 pairing loop: candidates -> LLM verdicts -> registry (source=LLM).
         engine = EquivalenceEngine()

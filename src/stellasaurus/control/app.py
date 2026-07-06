@@ -44,6 +44,10 @@ def create_app(read_model: ReadModel, *, push_interval_ms: int = 250) -> FastAPI
     async def books() -> list:
         return read_model.all_book_views()
 
+    @app.get("/opportunities")
+    async def opportunities() -> dict:
+        return read_model.opportunities()
+
     @app.get("/books/{pair_id}")
     async def book(pair_id: str) -> dict:
         return read_model.book_view(pair_id)
@@ -59,6 +63,7 @@ def create_app(read_model: ReadModel, *, push_interval_ms: int = 250) -> FastAPI
                     "pairs": read_model.pairs(),
                     "catalog": read_model.catalog_stats(),
                     "books": read_model.all_book_views(),
+                    "opportunities": read_model.opportunities(),
                 }
                 await socket.send_text(json.dumps(payload, default=str))
                 await asyncio.sleep(interval)
