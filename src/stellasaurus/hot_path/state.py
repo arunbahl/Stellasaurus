@@ -54,6 +54,12 @@ class HotStateStore:
         self._books_lock = threading.Lock()
         self._staleness_ns = book_staleness_ms * 1_000_000
         self._clock = clock or SystemClock()
+        # Last frame received per venue across ALL markets. Delta feeds only
+        # push on change, so an unchanged book is still trustworthy while its
+        # venue's feed is demonstrably alive (§6.5 staleness is feed-level).
+        self._venue_frame: dict[Venue, AtomicRef[int]] = {
+            v: AtomicRef(0) for v in Venue
+        }
 
     # --- HotState (reads) ---
     def registry(self) -> RegistrySnapshot:
@@ -70,17 +76,22 @@ class HotStateStore:
         return ref.get() if ref is not None else None
 
     def is_fresh(self, pair_id: str) -> bool:
-        """Both legs present and updated within ``book_staleness_ms``.
+        """Both legs present, and each leg's venue demonstrably alive.
 
-        A stale or missing leg makes the pair non-evaluable: you cannot assert
-        "locked" on a stale book (DESIGN §6.5).
+        A leg is fresh if its book updated within ``book_staleness_ms`` OR its
+        venue delivered ANY frame within that window (delta feeds only push on
+        change — an unchanged book on a live feed is current, not stale). A
+        missing book, or a venue gone quiet entirely, makes the pair
+        non-evaluable: you cannot assert "locked" on a dead feed (§6.5).
         """
         now = self._clock.mono_ns()
         for venue in (Venue.KALSHI, Venue.POLYMARKET):
             book = self.book(pair_id, venue)
             if book is None:
                 return False
-            if now - book.recv_mono_ns > self._staleness_ns:
+            book_fresh = now - book.recv_mono_ns <= self._staleness_ns
+            venue_fresh = now - self._venue_frame[venue].get() <= self._staleness_ns
+            if not (book_fresh or venue_fresh):
                 return False
         return True
 
@@ -101,6 +112,7 @@ class HotStateStore:
         self._feed_health.publish(health)
 
     def publish_book(self, book: NormalizedBook) -> None:
+        self._venue_frame[book.venue].publish(book.recv_mono_ns)
         key = (book.pair_id, book.venue)
         ref = self._books.get(key)
         if ref is None:

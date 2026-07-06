@@ -69,3 +69,22 @@ def test_stale_when_a_leg_too_old():
     store.publish_book(_book(Venue.POLYMARKET, recv_mono_ns=0))
     clock.t = 3_000 * 1_000_000  # 3000 ms later, exceeds 2000 ms threshold
     assert store.is_fresh("p") is False
+
+
+def test_quiet_book_on_live_feed_stays_fresh():
+    """Delta feeds only push on change: an old book is fresh while ANY frame
+    from its venue is recent."""
+    clock = FakeClock()
+    store = _store(clock)
+    store.publish_book(_book(Venue.KALSHI, recv_mono_ns=0))
+    store.publish_book(_book(Venue.POLYMARKET, recv_mono_ns=0))
+    clock.t = 10_000 * 1_000_000  # both books now 10s old (threshold 2s)
+    assert store.is_fresh("p") is False  # venues quiet too -> stale
+    # a frame for ANOTHER market arrives on each venue -> feeds alive
+    for venue in (Venue.KALSHI, Venue.POLYMARKET):
+        other = NativeBook(venue, "other", (PriceLevel(500_000, 1),),
+                           (PriceLevel(510_000, 1),), None, None, 2,
+                           clock.t - 1_000_000, 0)
+        store.publish_book(normalize(other, polarity=OutcomePolarity.DIRECT,
+                                     pair_id="other-pair"))
+    assert store.is_fresh("p") is True  # quiet book, live feed -> fresh
