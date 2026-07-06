@@ -5,10 +5,16 @@ production venues, zero fills, zero cost):
   * Kalshi V2: POST /portfolio/events/orders, single-book bid/ask semantics,
     fixed-point string count/price; unmarketable FOK -> 409
     fill_or_kill_insufficient_resting_volume (treated as clean zero-fill).
-  * Polymarket: POST /v1/orders with intent/tif/price(Amount)/quantity;
-    response {id, executions[]}; killed FOK never persists; cancel is
-    POST /v1/order/{id}/cancel. NOTE: timeInForce/limitPrice field names are
-    silently IGNORED by the API (order rests as DAY) — a validated footgun.
+  * Polymarket: POST /v1/orders with intent/tif/price(Amount)/quantity; cancel
+    is POST /v1/order/{id}/cancel. TWO validated footguns:
+      (1) timeInForce/limitPrice field names are silently IGNORED (order rests
+          as DAY) — use tif/price.
+      (2) the create response's `executions` array is EMPTY even on a FULL FILL.
+          Fill detection MUST read `cumQuantity` from an order lookup, never the
+          create response — see `_settle`. (Trusting `executions` reported real
+          fills as misses and left naked positions.)
+    Poly exposes a single YES book; canonical-NO is bought via
+    ORDER_INTENT_BUY_SHORT (validated fills register as YES-sold).
 
 Every submit is refused unless ``live_trading_enabled`` is true — and the
 composition root additionally never wires these unless that flag is set, so the
@@ -197,32 +203,63 @@ class PolymarketOrderGateway:
         r = await self._http.post(f"{self._base}{path}", json=body, headers=headers)
         r.raise_for_status()
         raw = r.json()
-        # Response shape (validated): {"id": ..., "executions": [...]}. A killed
-        # FOK returns executions=[] and the order does not persist.
-        executions = raw.get("executions") or []
-        filled = 0
-        notional = 0.0
-        fees = 0.0
-        for ex in executions:
-            q = float(ex.get("quantity") or ex.get("qty") or 0)
-            px = ex.get("price") or ex.get("px") or {}
-            pxv = float(px.get("value") if isinstance(px, dict) else px or 0)
-            com = ex.get("commission") or ex.get("commissionNotional") or {}
-            comv = float(com.get("value") if isinstance(com, dict) else com or 0)
-            filled += q
-            notional += q * pxv
-            fees += comv
-        filled_int = int(filled)
-        avg_micros = int(round(notional / filled * 1_000_000)) if filled else None
-        # Execution prices for BUY_SHORT are in short terms == the canonical
-        # price of the side we bought; no conversion (same reasoning as above).
+        order_id = raw.get("id")
+
+        # CRITICAL (validated live 2026-07-06): the create-order response's
+        # `executions` array is EMPTY even when the order FULLY FILLS. Trusting
+        # it silently reported real fills as misses, unwound the other leg, and
+        # left naked positions. The ONLY authoritative fill count is
+        # `cumQuantity` from an order lookup — always poll it.
+        filled_int, avg_micros, fees_micros = await self._settle(order_id, raw)
         return OrderResult(
             venue=self.venue, native_id=native_id, side=side,
             requested_qty=qty, filled_qty=filled_int,
-            avg_price_micros=avg_micros,
-            fees_micros=int(round(fees * 1_000_000)) if executions else None,
-            order_id=raw.get("id"), raw=raw,
+            avg_price_micros=avg_micros, fees_micros=fees_micros,
+            order_id=order_id, raw=raw,
         )
+
+    async def _settle(
+        self, order_id: str | None, create_raw: dict[str, Any]
+    ) -> tuple[int, Micros | None, Micros | None]:
+        """Authoritative fill via order lookup (cumQuantity). Returns
+        (filled_qty, avg_price_micros, fees_micros). A FOK either fully fills or
+        is killed, so the immediate post-submit lookup is final."""
+        def parse_execs(execs: list[dict[str, Any]]) -> tuple[float, float, float]:
+            f = n = c = 0.0
+            for ex in execs:
+                q = float(ex.get("quantity") or ex.get("qty") or 0)
+                px = ex.get("price") or ex.get("px") or {}
+                pxv = float(px.get("value") if isinstance(px, dict) else px or 0)
+                com = ex.get("commission") or ex.get("commissionNotional") or {}
+                comv = float(com.get("value") if isinstance(com, dict) else com or 0)
+                f += q
+                n += q * pxv
+                c += comv
+            return f, n, c
+
+        # Prefer the create response's executions if it (ever) carries them.
+        filled, notional, fees = parse_execs(create_raw.get("executions") or [])
+        order: dict[str, Any] = {}
+        if order_id is not None:
+            try:
+                lp = f"/v1/order/{order_id}"
+                h = self._signer.headers(timestamp_ms=wall_ms(), method="GET", path=lp)
+                rr = await self._http.get(f"{self._base}{lp}", headers=h)
+                if rr.status_code == 200:
+                    order = rr.json().get("order", {})
+            except Exception as exc:  # noqa: BLE001
+                _log.warning("poly_order_lookup_failed", order_id=order_id, error=str(exc))
+        # cumQuantity is authoritative; it overrides an empty executions array.
+        cum = order.get("cumQuantity")
+        if cum is not None:
+            filled = float(cum)
+            if not notional:  # no execution detail -> use the order's avg price
+                avg = order.get("avgPx") or order.get("averagePrice") or order.get("price")
+                avgv = float(avg.get("value") if isinstance(avg, dict) else avg or 0)
+                notional = filled * avgv
+        avg_micros = int(round(notional / filled * 1_000_000)) if filled else None
+        fees_micros = int(round(fees * 1_000_000)) if fees else None
+        return int(filled), avg_micros, fees_micros
 
     async def cancel(self, *, order_id: str, native_id: str) -> bool:
         """POST /v1/order/{id}/cancel (validated live). True on 200."""

@@ -193,6 +193,9 @@ async def run(settings: Settings | None = None) -> None:
                     },
                     slippage_tolerance_bips=settings.slippage_tolerance_bips,
                     requote=_requote,
+                    halt=lambda reason: halt.set_halted(
+                        True, actor="live_execution", reason=reason
+                    ),
                 )
                 executor = live_engine  # type: ignore[assignment]
                 _log.warning("LIVE_TRADING_ENABLED", note="real orders will be placed")

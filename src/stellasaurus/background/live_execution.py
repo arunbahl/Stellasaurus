@@ -48,6 +48,7 @@ class LiveExecutionEngine:
         slippage_tolerance_bips: int,
         clock: Clock | None = None,
         requote: object | None = None,  # async (intent) -> (vy, vn) micros or None
+        halt: object | None = None,  # (reason: str) -> None, called on a hanging leg
     ) -> None:
         self._state = state
         self._positions = positions
@@ -55,6 +56,7 @@ class LiveExecutionEngine:
         self._slip_bips = slippage_tolerance_bips
         self._clock = clock or SystemClock()
         self._requote = requote
+        self._halt = halt
         self._queue: asyncio.Queue[TradeIntent] = asyncio.Queue(maxsize=64)
         self._counter = 0
 
@@ -176,22 +178,46 @@ class LiveExecutionEngine:
         opposite = Side.NO if yes_ok else Side.YES
         native, pol = leg(filled_venue)
         unwind_loss: Micros | None = None
-        try:
-            # Marketable: pay up to (1 - 0) — effectively crossing the book.
-            unwind = await self._gateways[filled_venue].buy_fok(
-                native_id=native, side=opposite, qty=intent.qty,
-                limit_price_micros=990_000, polarity=pol,
+        unwound = False
+        # Retry the flatten a few times, escalating to a fully-crossing price.
+        # A gateway may report a zero-fill WITHOUT raising (e.g. Kalshi's 409
+        # insufficient_resting_volume) — that is NOT a successful unwind and
+        # must be checked, or we record a hedged-looking position while a naked
+        # leg is still live (validated: a silent hanging leg on 2026-07-06).
+        for attempt in range(3):
+            try:
+                unwind = await self._gateways[filled_venue].buy_fok(
+                    native_id=native, side=opposite, qty=intent.qty,
+                    limit_price_micros=999_000, polarity=pol,
+                )
+            except Exception as exc:  # noqa: BLE001
+                _log.error("live_unwind_error", pair_id=intent.pair_id,
+                           venue=filled_venue.value, attempt=attempt, error=str(exc))
+                continue
+            if unwind.fully_filled:
+                buy_px = filled_res.avg_price_micros or 0
+                sell_equiv = 1_000_000 - (unwind.avg_price_micros or 999_000)
+                unwind_loss = intent.qty * max(0, buy_px - sell_equiv) + (
+                    (filled_res.fees_micros or 0) + (unwind.fees_micros or 0)
+                )
+                unwound = True
+                _log.warning("live_single_leg_unwound", pair_id=intent.pair_id,
+                             venue=filled_venue.value, loss_micros=unwind_loss)
+                break
+
+        if not unwound:
+            # NAKED leg we could not flatten. Record HANGING, mark loss to worst
+            # case (full leg cost), and HALT so nothing else trades until a human
+            # flattens it manually. This is the one outcome the design forbids.
+            unwind_loss = intent.qty * (filled_res.avg_price_micros or 0) + (
+                filled_res.fees_micros or 0
             )
-            buy_px = filled_res.avg_price_micros or 0
-            sell_equiv = 1_000_000 - (unwind.avg_price_micros or 990_000)
-            unwind_loss = intent.qty * max(0, buy_px - sell_equiv) + (
-                (filled_res.fees_micros or 0) + (unwind.fees_micros or 0)
-            )
-            _log.warning("live_single_leg_unwound", pair_id=intent.pair_id,
-                         venue=filled_venue.value, loss_micros=unwind_loss)
-        except Exception as exc:  # noqa: BLE001
-            _log.error("live_unwind_FAILED_hanging_leg", pair_id=intent.pair_id,
-                       venue=filled_venue.value, error=str(exc))
+            if self._halt is not None:
+                self._halt("hanging_leg")  # type: ignore[operator]
+            _log.error("live_unwind_FAILED_HANGING_leg_HALTING", pair_id=intent.pair_id,
+                       venue=filled_venue.value, side=filled_side.value,
+                       native_id=native, qty=intent.qty)
+
         self._positions.record(PaperPosition(
             position_id=position_id, pair_id=intent.pair_id,
             orientation=intent.orientation, qty=intent.qty,
@@ -202,7 +228,8 @@ class LiveExecutionEngine:
             if filled_side is Side.NO else None,
             fees_micros=filled_res.fees_micros or 0,
             committed_micros=0,
-            hedge_status=HedgeStatus.UNWOUND, unwind_loss_micros=unwind_loss,
+            hedge_status=HedgeStatus.UNWOUND if unwound else HedgeStatus.HANGING,
+            unwind_loss_micros=unwind_loss,
             opened_wall_ms=self._clock.wall_ms(),
             resolves_at_ms=entry.resolves_at_ms,
         ))

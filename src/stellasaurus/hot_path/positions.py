@@ -21,6 +21,7 @@ class HedgeStatus(StrEnum):
     HEDGED = "HEDGED"  # both legs filled — safe, held to resolution
     UNWOUND = "UNWOUND"  # single leg filled, immediately flattened (loss taken)
     FAILED = "FAILED"  # neither leg filled — nothing held
+    HANGING = "HANGING"  # single leg filled AND unwind FAILED — NAKED, needs action
 
 
 @dataclass(frozen=True, slots=True)
