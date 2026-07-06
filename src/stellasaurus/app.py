@@ -19,6 +19,7 @@ from dotenv import load_dotenv
 
 from stellasaurus.background.catalog_sync import CatalogSync
 from stellasaurus.background.equivalence import EquivalenceEngine
+from stellasaurus.background.fee_sync import FeeParamSync
 from stellasaurus.background.feed_manager import FeedManager
 from stellasaurus.background.halt import HaltController
 from stellasaurus.background.pairing import PairingLoop
@@ -44,6 +45,7 @@ from stellasaurus.hot_path.state import HotStateStore
 from stellasaurus.storage.audit_repo import AuditRepo
 from stellasaurus.storage.db import Database
 from stellasaurus.storage.markets_repo import MarketsRepo
+from stellasaurus.storage.pnl_repo import PnlRepo
 from stellasaurus.storage.positions_repo import PositionsRepo
 from stellasaurus.storage.registry_repo import RegistryRepo
 from stellasaurus.venues.factory import venue_clients
@@ -138,6 +140,7 @@ async def run(settings: Settings | None = None) -> None:
         # --- Phase 4: risk manager + PAPER executor + kill switch ---
         positions_store = PositionsStore()
         positions_repo = PositionsRepo(db)
+        pnl_repo = PnlRepo(db)
         risk = RiskManager(state=store, positions=positions_store)
         executor = PaperExecutionEngine(
             state=store, positions=positions_store, fee_params=fee_params,
@@ -192,11 +195,23 @@ async def run(settings: Settings | None = None) -> None:
                             "unwind_loss_micros": p.unwind_loss_micros},
                 )
             for p in positions_store.resolve_expired(wall_ms()):
+                # Locked pair pays $1/pair at resolution: realized = payout - committed.
+                payout = p.qty * 1_000_000
+                realized = payout - p.committed_micros
+                pnl_repo.record(
+                    pair_id=p.pair_id,
+                    predicted_edge_micros=realized,  # paper fills == predicted
+                    realized_edge_micros=realized,
+                    fees_micros=p.fees_micros,
+                    detail={"position_id": p.position_id, "qty": p.qty,
+                            "committed_micros": p.committed_micros},
+                )
                 audit_repo.append(
                     actor="paper_executor", event_type="POSITION_RESOLVED",
                     pair_id=p.pair_id,
                     detail={"position_id": p.position_id,
-                            "committed_micros": p.committed_micros},
+                            "committed_micros": p.committed_micros,
+                            "realized_edge_micros": realized},
                 )
 
         # --- read model ---
@@ -204,6 +219,7 @@ async def run(settings: Settings | None = None) -> None:
         read_model.opportunity_sink = opp_sink
         read_model.positions_store = positions_store
         read_model.risk_manager = risk
+        read_model.pnl_totals_provider = pnl_repo.totals
         read_model.feed_stats_provider = sub_mgr.feed_stats
         read_model.catalog_stats_provider = lambda: {
             "counts": catalog.last_counts,
@@ -248,6 +264,16 @@ async def run(settings: Settings | None = None) -> None:
         )
         supervisor.run_periodic("opportunity_drain", 5, drain_opportunities)
         supervisor.run_periodic("halt_watch", 10, halt.watch_once)
+
+        # Phase 5: fee-param sync + divergence reconciliation (§6.4/§6.10).
+        fee_sync = FeeParamSync(
+            settings=settings, http=http, clients=clients, store=store,
+            initial=fee_params, publish_to=[evaluator, executor],
+            halt=halt, audit_repo=audit_repo,
+        )
+        supervisor.run_periodic(
+            "fee_sync", settings.fee_param_refresh_seconds, fee_sync.sync_once
+        )
 
         # Phase 2 pairing loop: candidates -> LLM verdicts -> registry (source=LLM).
         engine = EquivalenceEngine()

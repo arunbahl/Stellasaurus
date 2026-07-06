@@ -32,10 +32,13 @@ from stellasaurus.hot_path.seams import TradeIntent
 from stellasaurus.hot_path.state import HotState
 
 
-def _fee(venue: Venue, qty: int, price: Micros, params: FeeParams) -> Micros:
+def _fee(
+    venue: Venue, qty: int, price: Micros, params: FeeParams,
+    *, kalshi_series: str | None = None, poly_market: str | None = None,
+) -> Micros:
     if venue is Venue.KALSHI:
-        return kalshi_fee_micros(qty, price, params=params)
-    return poly_fee_micros(qty, price, params=params)
+        return kalshi_fee_micros(qty, price, params=params, series=kalshi_series)
+    return poly_fee_micros(qty, price, params=params, market=poly_market)
 
 
 def _leg_fill(
@@ -79,6 +82,10 @@ class PaperExecutionEngine:
         self._clock = clock or SystemClock()
         self._counter = 0
 
+    def publish_fee_params(self, params: FeeParams) -> None:
+        """Atomic rebind — background fee sync swaps params without locking."""
+        self._fee_params = params
+
     def _limit(self, intent_price: Micros) -> Micros:
         return intent_price + (intent_price * self._slip_bips) // 10_000
 
@@ -89,6 +96,8 @@ class PaperExecutionEngine:
         position_id = f"paper-{intent.pair_id}-{now_ms}-{self._counter}"
         entry = self._state.registry().by_id.get(intent.pair_id)
         resolves = entry.resolves_at_ms if entry else None
+        kseries = entry.kalshi_ticker.split("-", 1)[0] if entry else None
+        pmarket = entry.poly_market_slug if entry else None
 
         yes_book = self._state.book(intent.pair_id, intent.yes_venue)
         no_book = self._state.book(intent.pair_id, intent.no_venue)
@@ -99,8 +108,10 @@ class PaperExecutionEngine:
 
         if vy is not None and vn is not None:
             fees = (
-                _fee(intent.yes_venue, intent.qty, vy, params)
-                + _fee(intent.no_venue, intent.qty, vn, params)
+                _fee(intent.yes_venue, intent.qty, vy, params,
+                     kalshi_series=kseries, poly_market=pmarket)
+                + _fee(intent.no_venue, intent.qty, vn, params,
+                       kalshi_series=kseries, poly_market=pmarket)
             )
             self._positions.record(PaperPosition(
                 position_id=position_id, pair_id=intent.pair_id,
@@ -134,8 +145,10 @@ class PaperExecutionEngine:
             filled_venue, filled_price, yes_side = intent.no_venue, vn, False  # type: ignore[assignment]
             book = no_book
         sell_vwap = _bid_vwap(book, yes_side=yes_side, qty=intent.qty)
-        buy_fee = _fee(filled_venue, intent.qty, filled_price, params)
-        sell_fee = _fee(filled_venue, intent.qty, sell_vwap, params) if sell_vwap else 0
+        buy_fee = _fee(filled_venue, intent.qty, filled_price, params,
+                       kalshi_series=kseries, poly_market=pmarket)
+        sell_fee = _fee(filled_venue, intent.qty, sell_vwap, params,
+                        kalshi_series=kseries, poly_market=pmarket) if sell_vwap else 0
         loss = intent.qty * (filled_price - sell_vwap) + buy_fee + sell_fee
         self._positions.record(PaperPosition(
             position_id=position_id, pair_id=intent.pair_id,

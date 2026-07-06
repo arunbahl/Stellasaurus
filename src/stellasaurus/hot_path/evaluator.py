@@ -42,10 +42,13 @@ _ORIENTATIONS: tuple[tuple[str, Venue, Venue], ...] = (
 )
 
 
-def _venue_fee(venue: Venue, qty: int, price: Micros, params: FeeParams) -> Micros:
+def _venue_fee(
+    venue: Venue, qty: int, price: Micros, params: FeeParams,
+    *, kalshi_series: str | None, poly_market: str | None,
+) -> Micros:
     if venue is Venue.KALSHI:
-        return kalshi_fee_micros(qty, price, params=params)
-    return poly_fee_micros(qty, price, params=params)
+        return kalshi_fee_micros(qty, price, params=params, series=kalshi_series)
+    return poly_fee_micros(qty, price, params=params, market=poly_market)
 
 
 def _depth(asks: tuple, cap: int) -> int:  # type: ignore[type-arg]
@@ -96,12 +99,14 @@ class OpportunityEvaluator:
             t_days = max((entry.resolves_at_ms - now_ms) / _DAY_MS, limits.min_t_days)
 
         best: Opportunity | None = None
+        kalshi_series = entry.kalshi_ticker.split("-", 1)[0]
         for orientation, yes_venue, no_venue in _ORIENTATIONS:
             opp = self._evaluate(
                 pair_id=pair_id, orientation=orientation,
                 yes_venue=yes_venue, no_venue=no_venue,
                 fresh=fresh, t_days=t_days, limits=limits,
                 params=params, now_ms=now_ms,
+                kalshi_series=kalshi_series, poly_market=entry.poly_market_slug,
             )
             self._sink.push(opp)
             if opp.would_fire and (
@@ -130,6 +135,7 @@ class OpportunityEvaluator:
         self, *, pair_id: str, orientation: str, yes_venue: Venue, no_venue: Venue,
         fresh: bool, t_days: float | None, limits: LimitsSnapshot,
         params: FeeParams, now_ms: int,
+        kalshi_series: str | None = None, poly_market: str | None = None,
     ) -> Opportunity:
         def blocked(
             gate: str,
@@ -187,8 +193,10 @@ class OpportunityEvaluator:
         if vy is None or vn is None:
             return blocked("insufficient_depth", qty=qty)
 
-        fee_yes = _venue_fee(yes_venue, qty, vy, params)
-        fee_no = _venue_fee(no_venue, qty, vn, params)
+        fee_yes = _venue_fee(yes_venue, qty, vy, params,
+                             kalshi_series=kalshi_series, poly_market=poly_market)
+        fee_no = _venue_fee(no_venue, qty, vn, params,
+                            kalshi_series=kalshi_series, poly_market=poly_market)
         fees_per_pair = (fee_yes + fee_no + qty - 1) // qty  # ceil per pair
         committed = vy + vn + fees_per_pair
         net = PAYOUT_MICROS - committed

@@ -76,6 +76,8 @@ class ReadModel:
         if store is None:
             return {"totals": {}, "open": [], "decisions": []}
         t = store.totals()
+        pnl_provider = getattr(self, "pnl_totals_provider", None)
+        pnl = pnl_provider() if pnl_provider else {}
         return {
             "totals": {
                 "open_pairs": t.open_pairs,
@@ -83,6 +85,8 @@ class ReadModel:
                 "unwind_count": t.unwind_count,
                 "unwind_loss": micros_to_str(t.unwind_loss_micros),
                 "halted": self._store.limits().halted,
+                "settled": pnl.get("settled", 0),
+                "realized_pnl": micros_to_str(pnl.get("realized_micros", 0)),
             },
             "open": [
                 {
