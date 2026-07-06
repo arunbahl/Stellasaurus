@@ -38,6 +38,7 @@ class PairStatus(StrEnum):
 class PairSource(StrEnum):
     MANUAL_SEED = "MANUAL_SEED"
     LLM = "LLM"
+    STRUCTURED = "STRUCTURED"  # deterministic pre-check verdict (DESIGN §6.2 step 1)
 
 
 class Side(StrEnum):

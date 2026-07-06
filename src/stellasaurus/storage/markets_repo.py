@@ -80,6 +80,17 @@ class MarketsRepo:
             ).fetchone()
         return _to_row(row) if row else None
 
+    def unresolved_markets(self, venue: Venue, *, now_ms: int) -> list[MarketRow]:
+        """Every catalogued market for a venue that has not yet resolved —
+        the accumulated result of all sweeps, which is what pairing consumes."""
+        with self._db.connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM markets WHERE venue=? "
+                "AND (resolves_at_ms IS NULL OR resolves_at_ms > ?)",
+                (venue.value, now_ms),
+            ).fetchall()
+        return [_to_row(r) for r in rows]
+
     def count_by_venue(self) -> dict[str, int]:
         with self._db.connect() as conn:
             rows = conn.execute(

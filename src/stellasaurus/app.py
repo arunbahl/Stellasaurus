@@ -134,7 +134,7 @@ async def run(settings: Settings | None = None) -> None:
         engine = EquivalenceEngine()
         if settings.pairing_enabled and engine.configured:
             pairing = PairingLoop(
-                clients=clients,
+                markets_repo=markets_repo,
                 engine=engine,
                 registry_repo=registry_repo,
                 audit_repo=audit_repo,

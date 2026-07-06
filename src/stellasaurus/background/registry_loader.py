@@ -153,9 +153,12 @@ class RegistryLoader:
         self._registry.upsert(entry)
 
     def publish(self) -> RegistrySnapshot:
-        """Rebuild the immutable snapshot from the durable registry and publish."""
+        """Rebuild the immutable snapshot from the durable registry and publish.
+        Pairs past resolution are excluded from the verified/streamed set."""
         self._version += 1
-        snapshot = RegistrySnapshot.build(self._version, self._registry.all_entries())
+        snapshot = RegistrySnapshot.build(
+            self._version, self._registry.all_entries(), now_ms=wall_ms()
+        )
         self._store.publish_registry(snapshot)
         audit(
             self._audit,

@@ -14,7 +14,7 @@ from stellasaurus.storage.registry_repo import RegistryRepo
 from stellasaurus.venues.base import RawMarket
 
 DAY = 86_400_000
-T0 = 1_783_400_400_000  # some UTC instant
+T0 = 1_999_000_000_000  # far-future UTC instant (markets must be unresolved)
 
 
 def _m(venue: Venue, nid: str, title: str, resolves: int = T0, rules: str = "") -> RawMarket:
@@ -100,6 +100,7 @@ def _fixture(tmp_path):
     db = Database(tmp_path / "t.db")
     db.migrate()
     registry = RegistryRepo(db)
+    markets = MarketsRepo(db)
     store = HotStateStore(
         registry=RegistrySnapshot.empty(),
         limits=LimitsSnapshot(1, True, 0, 0.0, 1, 1, 1, 1, 1, 1, 0.5),
@@ -108,27 +109,36 @@ def _fixture(tmp_path):
     loader = RegistryLoader(
         seed_path=tmp_path / "no-seed.yaml",
         registry_repo=registry,
-        markets_repo=MarketsRepo(db),
+        markets_repo=markets,
         audit_repo=AuditRepo(db),
         store=store,
     )
-    return registry, AuditRepo(db), loader, store
+    return registry, markets, AuditRepo(db), loader, store
+
+
+def _catalog(markets_repo, ms):
+    from stellasaurus.storage.markets_repo import MarketRow
+    from stellasaurus.venues.base import market_fingerprint
+    for m in ms:
+        markets_repo.upsert(MarketRow(
+            venue=m.venue, native_id=m.native_id, title=m.title, rules_text=m.rules_text,
+            settlement_source=m.settlement_source, resolves_at_ms=m.resolves_at_ms,
+            status=m.status, terms_fingerprint=market_fingerprint(m),
+        ))
 
 
 async def test_pairing_loop_writes_llm_rows_and_publishes(tmp_path):
-    registry, audit_repo, loader, store = _fixture(tmp_path)
+    registry, markets, audit_repo, loader, store = _fixture(tmp_path)
     k_eq = _m(Venue.KALSHI, "K-EQ", "Highest temperature in NYC 83 or below today")
     k_neq = _m(Venue.KALSHI, "K-NEQ", "Will the Lakers beat the Celtics tonight")
-    clients = {
-        Venue.KALSHI: FakeClient(Venue.KALSHI, [k_eq, k_neq]),
-        Venue.POLYMARKET: FakeClient(Venue.POLYMARKET, [
-            _m(Venue.POLYMARKET, "P-EQ", "Highest temperature in NYC 83 or below today"),
-            _m(Venue.POLYMARKET, "P-NEQ", "Lakers beat Celtics tonight"),
-        ]),
-    }
+    _catalog(markets, [
+        k_eq, k_neq,
+        _m(Venue.POLYMARKET, "P-EQ", "Highest temperature in NYC 83 or below today"),
+        _m(Venue.POLYMARKET, "P-NEQ", "Lakers beat Celtics tonight"),
+    ])
     engine = FakeEngine(equivalent_ids={"K-EQ"})
     loop = PairingLoop(
-        clients=clients, engine=engine, registry_repo=registry,
+        markets_repo=markets, engine=engine, registry_repo=registry,
         audit_repo=audit_repo, publish=loader.publish, max_llm_calls=10,
     )
     evaluated = await loop.run_once()
@@ -147,19 +157,16 @@ async def test_pairing_loop_writes_llm_rows_and_publishes(tmp_path):
 
 
 async def test_pairing_loop_respects_llm_budget(tmp_path):
-    registry, audit_repo, loader, _ = _fixture(tmp_path)
+    registry, markets, audit_repo, loader, _ = _fixture(tmp_path)
     ks = [_m(Venue.KALSHI, f"K{i}", f"Event number {i} resolves in NYC today") for i in range(5)]
     ps = [
         _m(Venue.POLYMARKET, f"P{i}", f"Event number {i} resolves in NYC today")
         for i in range(5)
     ]
-    clients = {
-        Venue.KALSHI: FakeClient(Venue.KALSHI, ks),
-        Venue.POLYMARKET: FakeClient(Venue.POLYMARKET, ps),
-    }
+    _catalog(markets, ks + ps)
     engine = FakeEngine(equivalent_ids=set())
     loop = PairingLoop(
-        clients=clients, engine=engine, registry_repo=registry,
+        markets_repo=markets, engine=engine, registry_repo=registry,
         audit_repo=audit_repo, publish=loader.publish, max_llm_calls=2,
     )
     assert await loop.run_once() == 2

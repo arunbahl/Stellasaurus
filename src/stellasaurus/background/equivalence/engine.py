@@ -66,7 +66,12 @@ class EquivalenceEngine:
                 "Fireworks API key not configured "
                 "(set FIREWORKS_API_KEY_BAML in the environment or .env)"
             )
-        verdict: EquivalenceVerdict = await baml.EvaluateEquivalence(contract_a, contract_b)
+        try:
+            verdict: EquivalenceVerdict = await baml.EvaluateEquivalence(contract_a, contract_b)
+        except Exception:  # noqa: BLE001 - one retry absorbs ~20% parse flakes
+            # BAML's retry_policy covers transport errors but NOT schema-parse
+            # failures (model emitted unparseable output), so retry once here.
+            verdict = await baml.EvaluateEquivalence(contract_a, contract_b)
         _log.info(
             "equivalence_evaluated",
             a=contract_a.native_id,

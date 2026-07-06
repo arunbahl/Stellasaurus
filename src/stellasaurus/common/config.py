@@ -56,6 +56,13 @@ class Settings(BaseSettings):
     kalshi_catalog_page_size: int = 200
     kalshi_catalog_max_pages: int = 8
     kalshi_catalog_page_pause_ms: int = 300
+    # Series-rotation catalog: the global /markets list is ~99.6% multivariate
+    # parlay collections, so the catalog is built by sweeping ALL series (no
+    # category filtering — every series is visited) in budget-paced chunks per
+    # cycle, with a rotation cursor so successive cycles cover the full set.
+    # The ONLY exclusion is structural: parlay collections (KXMVE*) cannot form
+    # a clean two-leg locked pair regardless of topic.
+    kalshi_series_per_cycle: int = 300  # request budget per catalog cycle
 
     # --- dashboard ---
     # Reachability. "tailnet" (default) binds loopback + this host's Tailscale IP

@@ -69,9 +69,19 @@ class RegistrySnapshot:
     verified: tuple[str, ...]
 
     @staticmethod
-    def build(version: int, entries: list[PairRegistryEntry]) -> RegistrySnapshot:
+    def build(
+        version: int, entries: list[PairRegistryEntry], *, now_ms: int | None = None
+    ) -> RegistrySnapshot:
+        """``verified`` excludes pairs already past resolution (when ``now_ms``
+        is given) — a resolved market has no book and must not be streamed or
+        evaluated, even though its registry row remains for audit."""
         by_id = {e.pair_id: e for e in entries}
-        verified = tuple(e.pair_id for e in entries if e.status is PairStatus.VERIFIED)
+        verified = tuple(
+            e.pair_id
+            for e in entries
+            if e.status is PairStatus.VERIFIED
+            and (now_ms is None or e.resolves_at_ms is None or e.resolves_at_ms > now_ms)
+        )
         return RegistrySnapshot(version=version, by_id=by_id, verified=verified)
 
     @staticmethod
