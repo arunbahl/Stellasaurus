@@ -8,9 +8,8 @@ PARAMS = FeeParams(
     kalshi_taker_multiplier=Decimal("0.07"),
     kalshi_maker_multiplier=Decimal("0.0175"),
     kalshi_precision_micros=10_000,  # $0.01
-    poly_taker_bps=10,
-    poly_maker_bps=0,
-    poly_min_fee_micros=1_000,  # $0.001
+    poly_taker_coefficient=Decimal("0.06"),
+    poly_maker_coefficient=Decimal("-0.0125"),
 )
 
 
@@ -52,7 +51,7 @@ def test_kalshi_direct_member_precision():
         kalshi_taker_multiplier=Decimal("0.07"),
         kalshi_maker_multiplier=Decimal("0.0175"),
         kalshi_precision_micros=100,  # $0.0001 direct members
-        poly_taker_bps=10, poly_maker_bps=0, poly_min_fee_micros=1_000,
+        poly_taker_coefficient=Decimal("0.06"), poly_maker_coefficient=Decimal("-0.0125"),
     )
     # $0.0175 needs no rounding at $0.0001 precision
     assert kalshi_fee_micros(1, 500_000, params=fine) == 17_500
@@ -62,17 +61,28 @@ def test_kalshi_zero_contracts():
     assert kalshi_fee_micros(0, 500_000, params=PARAMS) == 0
 
 
-# --- Polymarket: 10 bps taker with $0.001 minimum, maker free ---
+# --- Polymarket: quadratic 0.06 taker / -0.0125 maker rebate, banker's cent ---
+# (verified against docs.polymarket.us/fees worked examples, 2026-07-06)
 
-def test_poly_taker_bps_of_notional():
-    # 100 contracts @ $0.60 -> notional $60 -> 0.10% = $0.06
-    assert poly_fee_micros(100, 600_000, params=PARAMS) == 60_000
-
-
-def test_poly_min_fee_applies_to_tiny_orders():
-    # 1 contract @ $0.10 -> notional $0.10 -> bps fee $0.0001 -> min $0.001
-    assert poly_fee_micros(1, 100_000, params=PARAMS) == 1_000
+def test_poly_taker_docs_example_max_at_50c():
+    # docs: taker max $1.50 per 100 contracts at p=$0.50
+    assert poly_fee_micros(100, 500_000, params=PARAMS) == 1_500_000
 
 
-def test_poly_maker_free():
-    assert poly_fee_micros(100, 600_000, params=PARAMS, is_maker=True) == 0
+def test_poly_taker_docs_example_1000_contracts():
+    # docs: 1000 @ p=0.10 -> 0.06*1000*0.09 = $5.40 ; p=0.50 -> $15.00
+    assert poly_fee_micros(1000, 100_000, params=PARAMS) == 5_400_000
+    assert poly_fee_micros(1000, 500_000, params=PARAMS) == 15_000_000
+
+
+def test_poly_maker_rebate_negative():
+    # docs: maker max -$0.31 per 100 at p=0.50 (banker's: -31.25c -> -31c... 
+    # -0.3125 dollars -> -31.25 cents -> half-to-even -> -31.25 rounds to -31? 
+    # quantize(-31.25) HALF_EVEN -> -31.2 -> int cents = -31
+    fee = poly_fee_micros(100, 500_000, params=PARAMS, is_maker=True)
+    assert fee == -310_000  # -$0.31 rebate
+
+
+def test_poly_bankers_rounding_to_cent():
+    # 10 @ 0.45: 0.06*10*0.45*0.55 = $0.1485 -> $0.15 (half-even on 14.85c -> 15c)
+    assert poly_fee_micros(10, 450_000, params=PARAMS) == 150_000

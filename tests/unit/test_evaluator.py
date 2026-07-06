@@ -20,9 +20,8 @@ PARAMS = FeeParams(
     kalshi_taker_multiplier=Decimal("0.07"),
     kalshi_maker_multiplier=Decimal("0.0175"),
     kalshi_precision_micros=10_000,
-    poly_taker_bps=10,
-    poly_maker_bps=0,
-    poly_min_fee_micros=1_000,
+    poly_taker_coefficient=Decimal("0.06"),
+    poly_maker_coefficient=Decimal("-0.0125"),
 )
 
 
@@ -94,10 +93,10 @@ def test_fires_on_clear_dislocation():
     assert a.would_fire and a.gate_failed is None
     assert a.qty == 10
     assert a.vwap_yes_micros == 400_000 and a.vwap_no_micros == 450_000
-    # fees: kalshi 10@0.40 -> 0.07*10*0.4*0.6=$0.168->ceil $0.17; poly 10@0.45
-    # notional $4.50 -> $0.0045; per pair = ceil((170000+4500)/10) = 17450
-    assert a.fees_per_pair_micros == 17_450
-    assert a.net_edge_micros == PAYOUT_MICROS - (400_000 + 450_000 + 17_450)
+    # fees: kalshi 10@0.40 -> 0.07*10*0.4*0.6=$0.168 -> ceil $0.17; poly 10@0.45
+    # quadratic 0.06*10*0.45*0.55=$0.1485 -> banker's $0.15; per pair = 32_000
+    assert a.fees_per_pair_micros == 32_000
+    assert a.net_edge_micros == PAYOUT_MICROS - (400_000 + 450_000 + 32_000)
     assert a.annualized_return is not None and a.annualized_return > 1.0
     # Orientation B costs 0.57 + 0.62 -> way negative, blocked at theta.
     assert opps["B"].would_fire is False and opps["B"].gate_failed == "theta"

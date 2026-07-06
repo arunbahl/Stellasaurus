@@ -20,10 +20,12 @@ from dotenv import load_dotenv
 from stellasaurus.background.catalog_sync import CatalogSync
 from stellasaurus.background.equivalence import EquivalenceEngine
 from stellasaurus.background.feed_manager import FeedManager
+from stellasaurus.background.halt import HaltController
 from stellasaurus.background.pairing import PairingLoop
 from stellasaurus.background.registry_loader import RegistryLoader
 from stellasaurus.background.scheduler import TaskSupervisor
 from stellasaurus.background.subscription_mgr import SubscriptionManager
+from stellasaurus.common.clock import wall_ms
 from stellasaurus.common.config import Settings, load_settings
 from stellasaurus.common.logging import configure_logging, get_logger
 from stellasaurus.common.types import Venue
@@ -31,14 +33,18 @@ from stellasaurus.control.app import create_app
 from stellasaurus.control.net import resolve_bind_hosts
 from stellasaurus.control.readmodel import ReadModel
 from stellasaurus.hot_path.evaluator import OpportunityEvaluator
+from stellasaurus.hot_path.execution import PaperExecutionEngine
 from stellasaurus.hot_path.fees import FeeParams
 from stellasaurus.hot_path.ingest import BookStore
 from stellasaurus.hot_path.opportunities import OpportunitySink
+from stellasaurus.hot_path.positions import PositionsStore
+from stellasaurus.hot_path.risk import RiskManager
 from stellasaurus.hot_path.snapshot import LimitsSnapshot, RegistrySnapshot
 from stellasaurus.hot_path.state import HotStateStore
 from stellasaurus.storage.audit_repo import AuditRepo
 from stellasaurus.storage.db import Database
 from stellasaurus.storage.markets_repo import MarketsRepo
+from stellasaurus.storage.positions_repo import PositionsRepo
 from stellasaurus.storage.registry_repo import RegistryRepo
 from stellasaurus.venues.factory import venue_clients
 
@@ -48,7 +54,10 @@ _log = get_logger("app")
 def _limits_from_settings(s: Settings) -> LimitsSnapshot:
     return LimitsSnapshot(
         version=1,
-        halted=not s.live_trading_enabled,  # Phase 1: trading disabled by definition
+        # Paper trading starts un-halted; the flag is exercised by the kill
+        # switch (manual + auto-triggers). REAL order submission remains
+        # separately hard-gated by live_trading_enabled when it exists.
+        halted=False,
         theta_micros=s.theta_micros,
         hurdle=s.hurdle,
         target_size_default=s.target_size_default,
@@ -121,12 +130,26 @@ async def run(settings: Settings | None = None) -> None:
             kalshi_taker_multiplier=Decimal(str(settings.kalshi_fee_multiplier_default)),
             kalshi_maker_multiplier=Decimal(str(settings.kalshi_fee_multiplier_default)) / 4,
             kalshi_precision_micros=settings.kalshi_balance_precision_micros,
-            poly_taker_bps=settings.poly_taker_bps_default,
-            poly_maker_bps=0,
-            poly_min_fee_micros=settings.poly_min_fee_micros,
+            poly_taker_coefficient=Decimal(str(settings.poly_taker_fee_coefficient)),
+            poly_maker_coefficient=Decimal(str(settings.poly_maker_fee_coefficient)),
         )
         opp_sink = OpportunitySink()
-        evaluator = OpportunityEvaluator(state=store, fee_params=fee_params, sink=opp_sink)
+
+        # --- Phase 4: risk manager + PAPER executor + kill switch ---
+        positions_store = PositionsStore()
+        positions_repo = PositionsRepo(db)
+        risk = RiskManager(state=store, positions=positions_store)
+        executor = PaperExecutionEngine(
+            state=store, positions=positions_store, fee_params=fee_params,
+            slippage_tolerance_bips=settings.slippage_tolerance_bips,
+        )
+        halt = HaltController(
+            store=store, positions=positions_store, audit_repo=audit_repo,
+        )
+        evaluator = OpportunityEvaluator(
+            state=store, fee_params=fee_params, sink=opp_sink,
+            risk_gate=risk, executor=executor,
+        )
         book_store.add_listener(evaluator.on_book_update)
 
         async def drain_opportunities() -> None:
@@ -148,16 +171,49 @@ async def run(settings: Settings | None = None) -> None:
                     },
                 )
             opp_sink.prune(frozenset(store.registry().verified))
+            # Phase 4 drains: risk decisions + positions to durable storage.
+            for d in risk.drain_decisions():
+                audit_repo.append(
+                    actor="risk_manager",
+                    event_type="RISK_DECISION",
+                    pair_id=d.pair_id,
+                    detail={"orientation": d.orientation, "qty": d.qty,
+                            "committed_micros": d.committed_micros,
+                            "approved": d.approved, "rejected_by": d.rejected_by},
+                )
+            for p in positions_store.drain_new():
+                positions_repo.upsert(p)
+                audit_repo.append(
+                    actor="paper_executor",
+                    event_type=f"PAPER_{p.hedge_status.value}",
+                    pair_id=p.pair_id,
+                    detail={"position_id": p.position_id, "qty": p.qty,
+                            "committed_micros": p.committed_micros,
+                            "unwind_loss_micros": p.unwind_loss_micros},
+                )
+            for p in positions_store.resolve_expired(wall_ms()):
+                audit_repo.append(
+                    actor="paper_executor", event_type="POSITION_RESOLVED",
+                    pair_id=p.pair_id,
+                    detail={"position_id": p.position_id,
+                            "committed_micros": p.committed_micros},
+                )
 
         # --- read model ---
         read_model = ReadModel(store)
         read_model.opportunity_sink = opp_sink
+        read_model.positions_store = positions_store
+        read_model.risk_manager = risk
         read_model.feed_stats_provider = sub_mgr.feed_stats
         read_model.catalog_stats_provider = lambda: {
             "counts": catalog.last_counts,
             "last_sync_ms": catalog.last_sync_ms,
         }
-        web = create_app(read_model, push_interval_ms=settings.dashboard_push_interval_ms)
+        web = create_app(
+            read_model,
+            push_interval_ms=settings.dashboard_push_interval_ms,
+            halt_controller=halt,
+        )
 
         # --- supervise ---
         supervisor = TaskSupervisor()
@@ -191,6 +247,7 @@ async def run(settings: Settings | None = None) -> None:
             "catalog_sync", settings.catalog_refresh_seconds, catalog.sync_once
         )
         supervisor.run_periodic("opportunity_drain", 5, drain_opportunities)
+        supervisor.run_periodic("halt_watch", 10, halt.watch_once)
 
         # Phase 2 pairing loop: candidates -> LLM verdicts -> registry (source=LLM).
         engine = EquivalenceEngine()

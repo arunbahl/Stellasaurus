@@ -34,13 +34,24 @@
   <header>
     <h1>Stellasaurus</h1>
     <span class="sub">Phase 1 — read-only spine · paper/sim · no trading</span>
-    <span id="conn" class="pill bad">disconnected</span>
+    <span id="halt-state" class="pill ok" style="margin-left:auto">active</span>
+    <button id="halt-btn" style="margin-left:10px;background:#21262d;color:#c9d1d9;border:1px solid #30363d;border-radius:6px;padding:3px 12px;cursor:pointer">HALT</button>
+    <span id="conn" class="pill bad" style="margin-left:10px">disconnected</span>
   </header>
   <main>
     <section>
       <h2>Feed health</h2>
       <table id="feeds"><thead><tr><th>Venue</th><th>Transport</th><th>Connected</th>
         <th>Frames</th><th>Reconnects</th><th>Last frame</th></tr></thead><tbody></tbody></table>
+    </section>
+    <section>
+      <h2>Paper positions &amp; risk</h2>
+      <div id="pos-totals" class="muted">—</div>
+      <table id="positions" style="margin-top:8px"><thead><tr>
+        <th>Position</th><th>Pair</th><th>Or</th><th>Q</th><th>Yes</th><th>No</th>
+        <th>Fees</th><th>Committed</th><th>Status</th><th>Unwind loss</th>
+      </tr></thead><tbody></tbody></table>
+      <div id="risk-decisions" class="muted" style="margin-top:8px">no risk decisions yet</div>
     </section>
     <section>
       <h2>Paper opportunities (fee-adjusted net edge, all gates)</h2>
@@ -116,6 +127,39 @@
         <td class="muted">${p.terms_fingerprint}</td></tr>`).join("");
     }
 
+    let halted = false;
+    function renderPositions(p) {
+      const t = p.totals || {};
+      halted = !!t.halted;
+      const hs = $("halt-state");
+      hs.textContent = halted ? "HALTED" : "active";
+      hs.className = "pill " + (halted ? "bad" : "ok");
+      $("halt-btn").textContent = halted ? "RESUME" : "HALT";
+      $("pos-totals").textContent =
+        `open pairs: ${t.open_pairs ?? 0} · committed: ${t.committed ?? "$0"} · ` +
+        `unwinds: ${t.unwind_count ?? 0} (loss ${t.unwind_loss ?? "$0"})`;
+      $("positions").querySelector("tbody").innerHTML = (p.open || []).map(x => `
+        <tr><td>${x.position_id.slice(0,28)}</td><td>${x.pair_id.slice(0,36)}</td>
+        <td>${x.orientation}</td><td>${x.qty}</td><td>${x.yes_price}</td>
+        <td>${x.no_price ?? '—'}</td><td>${x.fees}</td><td>${x.committed}</td>
+        <td>${pill(x.status, x.status === 'HEDGED' ? 'ok' : (x.status === 'UNWOUND' ? 'warn' : 'bad'))}</td>
+        <td>${x.unwind_loss ?? '—'}</td></tr>`).join("");
+      const ds = p.decisions || [];
+      $("risk-decisions").textContent = ds.length
+        ? "risk: " + ds.slice(-5).map(d =>
+            `${d.pair_id.slice(0,24)}/${d.orientation} ${d.approved ? "OK" : d.rejected_by}`
+          ).join(" · ")
+        : "no risk decisions yet";
+    }
+    document.addEventListener("DOMContentLoaded", () => {
+      document.getElementById("halt-btn").onclick = async () => {
+        const target = !halted;
+        if (target && !confirm("HALT: stop all new paper entries?")) return;
+        await fetch("/halt", {method: "POST", headers: {"Content-Type": "application/json"},
+                              body: JSON.stringify({halted: target, reason: "dashboard button"})});
+      };
+    });
+
     function renderOpps(o) {
       const rows = (o.latest || []).map(x => `
         <tr><td>${x.pair_id.slice(0,44)}</td><td>${x.orientation}</td>
@@ -145,6 +189,7 @@
       ws.onmessage = (ev) => {
         const d = JSON.parse(ev.data);
         renderFeeds(d.health?.feeds || []);
+        renderPositions(d.positions || {});
         renderOpps(d.opportunities || {});
         renderBooks(d.books || [], d.health?.freshness || []);
         renderPairs(d.pairs || []);

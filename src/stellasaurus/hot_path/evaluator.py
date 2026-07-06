@@ -29,6 +29,7 @@ from stellasaurus.common.types import Micros, Venue
 from stellasaurus.hot_path.book import walk_book_for_size
 from stellasaurus.hot_path.fees import FeeParams, kalshi_fee_micros, poly_fee_micros
 from stellasaurus.hot_path.opportunities import Opportunity, OpportunitySink
+from stellasaurus.hot_path.seams import Executor, RiskGate, TradeIntent
 from stellasaurus.hot_path.snapshot import LimitsSnapshot
 from stellasaurus.hot_path.state import HotState
 
@@ -65,11 +66,15 @@ class OpportunityEvaluator:
         state: HotState,
         fee_params: FeeParams,
         sink: OpportunitySink,
+        risk_gate: RiskGate | None = None,
+        executor: Executor | None = None,
         clock: Clock | None = None,
     ) -> None:
         self._state = state
         self._fee_params = fee_params
         self._sink = sink
+        self._risk = risk_gate
+        self._executor = executor
         self._clock = clock or SystemClock()
 
     def publish_fee_params(self, params: FeeParams) -> None:
@@ -90,15 +95,36 @@ class OpportunityEvaluator:
         if entry.resolves_at_ms is not None:
             t_days = max((entry.resolves_at_ms - now_ms) / _DAY_MS, limits.min_t_days)
 
+        best: Opportunity | None = None
         for orientation, yes_venue, no_venue in _ORIENTATIONS:
-            self._sink.push(
-                self._evaluate(
-                    pair_id=pair_id, orientation=orientation,
-                    yes_venue=yes_venue, no_venue=no_venue,
-                    fresh=fresh, t_days=t_days, limits=limits,
-                    params=params, now_ms=now_ms,
-                )
+            opp = self._evaluate(
+                pair_id=pair_id, orientation=orientation,
+                yes_venue=yes_venue, no_venue=no_venue,
+                fresh=fresh, t_days=t_days, limits=limits,
+                params=params, now_ms=now_ms,
             )
+            self._sink.push(opp)
+            if opp.would_fire and (
+                best is None or (opp.net_edge_micros or 0) > (best.net_edge_micros or 0)
+            ):
+                best = opp
+
+        # §6.6: one intent per update — the best passing orientation goes to the
+        # risk gate and (paper) executor when Phase 4 components are wired.
+        if best is not None and self._risk is not None and self._executor is not None:
+            intent = TradeIntent(
+                pair_id=best.pair_id,
+                orientation=best.orientation,
+                qty=best.qty,
+                yes_venue=best.yes_venue,
+                no_venue=best.no_venue,
+                vwap_yes_micros=best.vwap_yes_micros or 0,
+                vwap_no_micros=best.vwap_no_micros or 0,
+                net_edge_micros=best.net_edge_micros or 0,
+                created_mono_ns=self._clock.mono_ns(),
+            )
+            if self._risk.approve(intent):
+                self._executor.submit(intent)
 
     def _evaluate(  # noqa: PLR0911 - gate ladder reads clearest as early returns
         self, *, pair_id: str, orientation: str, yes_venue: Venue, no_venue: Venue,

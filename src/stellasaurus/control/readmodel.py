@@ -69,6 +69,53 @@ class ReadModel:
     def catalog_stats(self) -> dict[str, Any]:
         return dict(self.catalog_stats_provider())
 
+    # --- positions + risk (Phase 4, paper) ---
+    def positions(self) -> dict[str, Any]:
+        store = getattr(self, "positions_store", None)
+        risk = getattr(self, "risk_manager", None)
+        if store is None:
+            return {"totals": {}, "open": [], "decisions": []}
+        t = store.totals()
+        return {
+            "totals": {
+                "open_pairs": t.open_pairs,
+                "committed": micros_to_str(t.committed_micros),
+                "unwind_count": t.unwind_count,
+                "unwind_loss": micros_to_str(t.unwind_loss_micros),
+                "halted": self._store.limits().halted,
+            },
+            "open": [
+                {
+                    "position_id": p.position_id,
+                    "pair_id": p.pair_id,
+                    "orientation": p.orientation,
+                    "qty": p.qty,
+                    "yes_price": micros_to_str(p.yes_price_micros),
+                    "no_price": (
+                        micros_to_str(p.no_price_micros)
+                        if p.no_price_micros is not None else None
+                    ),
+                    "fees": micros_to_str(p.fees_micros),
+                    "committed": micros_to_str(p.committed_micros),
+                    "status": p.hedge_status.value,
+                    "unwind_loss": (
+                        micros_to_str(p.unwind_loss_micros)
+                        if p.unwind_loss_micros is not None else None
+                    ),
+                    "opened_ms": p.opened_wall_ms,
+                }
+                for p in store.open_positions()
+            ],
+            "decisions": [
+                {
+                    "pair_id": d.pair_id, "orientation": d.orientation,
+                    "qty": d.qty, "approved": d.approved,
+                    "rejected_by": d.rejected_by, "ts_ms": d.ts_wall_ms,
+                }
+                for d in (risk.decisions() if risk else ())
+            ][-25:],
+        }
+
     # --- paper opportunities (Phase 3) ---
     def opportunities(self) -> dict[str, Any]:
         sink = getattr(self, "opportunity_sink", None)

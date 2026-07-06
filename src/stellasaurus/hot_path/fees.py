@@ -7,34 +7,41 @@ evaluator more cautious, never less).
 Kalshi (event contracts, quadratic):
     fee(order) = round_up(multiplier * C * p * (1 - p))   to balance precision
     e.g. taker multiplier 0.07: 10 contracts @ $0.50 -> 0.07*10*0.25 = $0.175
-    -> $0.18 at $0.01 precision. Maker multiplier ~75% lower.
+    -> $0.18 at $0.01 precision. Maker multiplier ~75% lower. (Verified live
+    2026-07-06: /series/fee_changes has no per-series overrides scheduled.)
 
-Polymarket US:
-    taker fee = max(min_fee, taker_bps/10000 * notional), maker = 0.
-    notional = contracts * avg fill price.
+Polymarket US (VERIFIED against docs.polymarket.us/fees 2026-07-06 — the venue
+uses a QUADRATIC schedule, not the flat bps DESIGN.md assumed):
+    taker fee   = 0.06    * C * p * (1 - p)   (per-market feeCoefficient)
+    maker REBATE= -0.0125 * C * p * (1 - p)   (negative — paid to the maker)
+    rounded to the cent with banker's rounding (round half to even).
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from decimal import ROUND_CEILING, Decimal
+from decimal import ROUND_CEILING, ROUND_HALF_EVEN, Decimal
 
 from stellasaurus.common.types import Micros
 
 _MICRO = Decimal(1_000_000)
+_CENT = Decimal(10_000)  # micros per cent
 
 
 @dataclass(frozen=True, slots=True)
 class FeeParams:
     """Cached fee parameters (published at startup; background sync refreshes
-    them out of band in a later phase via /series/fee_changes and preview)."""
+    them out of band in a later phase via /series/fee_changes and preview).
+
+    Polymarket's coefficient is per-market (``feeCoefficient`` in the catalog);
+    this default applies when a market-specific value isn't wired through yet.
+    """
 
     kalshi_taker_multiplier: Decimal  # e.g. Decimal("0.07")
     kalshi_maker_multiplier: Decimal  # e.g. Decimal("0.0175")
     kalshi_precision_micros: Micros  # $0.01 standard accounts -> 10_000
-    poly_taker_bps: int  # 10 -> 0.10% of notional
-    poly_maker_bps: int  # 0
-    poly_min_fee_micros: Micros  # $0.001 -> 1_000
+    poly_taker_coefficient: Decimal  # e.g. Decimal("0.06")
+    poly_maker_coefficient: Decimal  # e.g. Decimal("-0.0125") — a rebate
 
 
 def _ceil_to(micros: Decimal, precision_micros: Micros) -> Micros:
@@ -67,13 +74,12 @@ def poly_fee_micros(
     params: FeeParams,
     is_maker: bool = False,
 ) -> Micros:
-    """Per-ORDER Polymarket fee: bps of notional with a minimum; maker free."""
+    """Per-ORDER Polymarket fee: coefficient * C * p * (1-p), banker's-rounded
+    to the cent. Negative for makers (rebate)."""
     if contracts <= 0:
         return 0
-    bps = params.poly_maker_bps if is_maker else params.poly_taker_bps
-    if bps == 0:
-        return 0
-    notional_micros = Decimal(contracts) * Decimal(price_micros)
-    raw = notional_micros * bps / Decimal(10_000)
-    fee = int(raw.quantize(Decimal(1), rounding=ROUND_CEILING))
-    return max(fee, params.poly_min_fee_micros)
+    p = Decimal(price_micros) / _MICRO
+    coeff = params.poly_maker_coefficient if is_maker else params.poly_taker_coefficient
+    raw_micros = coeff * contracts * p * (1 - p) * _MICRO
+    cents = (raw_micros / _CENT).quantize(Decimal(1), rounding=ROUND_HALF_EVEN)
+    return int(cents) * int(_CENT)

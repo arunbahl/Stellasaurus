@@ -21,8 +21,13 @@ _log = get_logger("control.app")
 _STATIC = Path(__file__).parent / "static"
 
 
-def create_app(read_model: ReadModel, *, push_interval_ms: int = 250) -> FastAPI:
-    app = FastAPI(title="Stellasaurus — Phase 1 (read-only spine)")
+def create_app(
+    read_model: ReadModel,
+    *,
+    push_interval_ms: int = 250,
+    halt_controller: object | None = None,
+) -> FastAPI:
+    app = FastAPI(title="Stellasaurus")
 
     @app.get("/", response_class=HTMLResponse)
     async def index() -> str:
@@ -48,6 +53,26 @@ def create_app(read_model: ReadModel, *, push_interval_ms: int = 250) -> FastAPI
     async def opportunities() -> dict:
         return read_model.opportunities()
 
+    @app.get("/positions")
+    async def positions() -> dict:
+        return read_model.positions()
+
+    @app.post("/halt")
+    async def set_halt(body: dict) -> dict:
+        if halt_controller is None:
+            return {"error": "controls not wired"}
+        halted = bool(body.get("halted", True))
+        reason = str(body.get("reason", "manual"))
+        halt_controller.set_halted(halted, actor="dashboard", reason=reason)  # type: ignore[attr-defined]
+        return {"halted": halted}
+
+    @app.post("/limits")
+    async def set_limits(body: dict) -> dict:
+        if halt_controller is None:
+            return {"error": "controls not wired"}
+        errors = halt_controller.update_limits(body, actor="dashboard")  # type: ignore[attr-defined]
+        return {"errors": errors, "applied": [k for k in body if k not in errors]}
+
     @app.get("/books/{pair_id}")
     async def book(pair_id: str) -> dict:
         return read_model.book_view(pair_id)
@@ -64,6 +89,7 @@ def create_app(read_model: ReadModel, *, push_interval_ms: int = 250) -> FastAPI
                     "catalog": read_model.catalog_stats(),
                     "books": read_model.all_book_views(),
                     "opportunities": read_model.opportunities(),
+                    "positions": read_model.positions(),
                 }
                 await socket.send_text(json.dumps(payload, default=str))
                 await asyncio.sleep(interval)
