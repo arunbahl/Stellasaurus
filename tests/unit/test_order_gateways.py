@@ -74,3 +74,15 @@ async def test_kalshi_gateway_refuses_when_gate_off(tmp_path):
     with pytest.raises(LiveGateDisabledError):
         await gw.buy_fok(native_id="KX", side=Side.NO, qty=1,
                          limit_price_micros=500_000, polarity=OutcomePolarity.DIRECT)
+
+
+def test_cent_tick_rounding_directions():
+    from stellasaurus.venues.orders import _ceil_cent, _floor_cent
+    # buys floor (never exceed intent); 0.6153 -> 0.61
+    assert _floor_cent(615_300) == 610_000
+    # asks ceil (never sell YES cheaper than intent); 0.3847 -> 0.39
+    assert _ceil_cent(384_700) == 390_000
+    # on-tick values unchanged
+    assert _floor_cent(610_000) == 610_000 and _ceil_cent(390_000) == 390_000
+    # buy limit never floors to zero
+    assert _floor_cent(900) == 10_000

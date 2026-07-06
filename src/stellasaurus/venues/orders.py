@@ -34,6 +34,20 @@ from stellasaurus.venues.signing import KalshiSigner, PolymarketSigner
 
 _log = get_logger("venues.orders")
 
+_CENT = 10_000  # micros
+
+
+def _floor_cent(micros: Micros) -> Micros:
+    """Round DOWN to the venue's cent tick — for BUY limits (never pay above
+    intent; validated: off-tick prices are rejected with invalid_price)."""
+    return max(_CENT, (micros // _CENT) * _CENT)
+
+
+def _ceil_cent(micros: Micros) -> Micros:
+    """Round UP to the cent tick — for ASK prices derived from a NO limit
+    (selling YES no lower than intended keeps the NO cost within intent)."""
+    return -(-micros // _CENT) * _CENT
+
 
 @dataclass(frozen=True, slots=True)
 class OrderResult:
@@ -92,9 +106,9 @@ class KalshiOrderGateway:
         if not self._enabled:
             raise LiveGateDisabledError("live_trading_enabled is false")
         if side is Side.YES:
-            book_side, price_micros = "bid", limit_price_micros
+            book_side, price_micros = "bid", _floor_cent(limit_price_micros)
         else:
-            book_side, price_micros = "ask", 1_000_000 - limit_price_micros
+            book_side, price_micros = "ask", _ceil_cent(1_000_000 - limit_price_micros)
         body = {
             "ticker": native_id,
             "client_order_id": f"stella-{uuid.uuid4().hex[:16]}",
@@ -161,8 +175,11 @@ class PolymarketOrderGateway:
             canonical_is_yes if polarity is OutcomePolarity.DIRECT else not canonical_is_yes
         )
         intent = "ORDER_INTENT_BUY_LONG" if native_long else "ORDER_INTENT_BUY_SHORT"
-        # A BUY_SHORT limit price is quoted in SHORT terms (1 - long price).
-        price = limit_price_micros if native_long else 1_000_000 - limit_price_micros
+        # VALIDATED (probe 2026-07-06): BUY_SHORT prices are quoted in SHORT
+        # terms, and the canonical price of the side being bought IS the native
+        # price of the mapped intent (both polarities) — no conversion, ever.
+        # (A 1-limit conversion here silently destroys the slippage cap.)
+        price = _floor_cent(limit_price_micros)
         # Field names VALIDATED live 2026-07-06: intent, tif, price (Amount),
         # quantity string. timeInForce/limitPrice are silently IGNORED (an
         # order defaults to DAY and rests) — never reintroduce them.
@@ -197,9 +214,8 @@ class PolymarketOrderGateway:
             fees += comv
         filled_int = int(filled)
         avg_micros = int(round(notional / filled * 1_000_000)) if filled else None
-        # native short fills are priced in short terms; convert back to canonical
-        if avg_micros is not None and not native_long:
-            avg_micros = 1_000_000 - avg_micros
+        # Execution prices for BUY_SHORT are in short terms == the canonical
+        # price of the side we bought; no conversion (same reasoning as above).
         return OrderResult(
             venue=self.venue, native_id=native_id, side=side,
             requested_qty=qty, filled_qty=filled_int,
