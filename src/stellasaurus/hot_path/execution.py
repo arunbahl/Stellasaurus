@@ -75,6 +75,7 @@ class PaperExecutionEngine:
         slippage_tolerance_bips: int,
         clock: Clock | None = None,
         on_release: object | None = None,  # (pair_id) -> None, frees risk reservation
+        on_cooldown: object | None = None,  # (pair_id) -> None, on UNWOUND/FAILED
     ) -> None:
         self._state = state
         self._positions = positions
@@ -83,6 +84,7 @@ class PaperExecutionEngine:
         self._clock = clock or SystemClock()
         self._counter = 0
         self._on_release = on_release
+        self._on_cooldown = on_cooldown
 
     def publish_fee_params(self, params: FeeParams) -> None:
         """Atomic rebind — background fee sync swaps params without locking."""
@@ -94,16 +96,21 @@ class PaperExecutionEngine:
         return intent_price + pad
 
     def submit(self, intent: TradeIntent) -> None:
+        status = HedgeStatus.FAILED
         try:
-            self._submit(intent)
+            status = self._submit(intent)
         finally:
+            # A non-hedged outcome starts a re-entry cooldown so a chronically
+            # half-filling pair can't churn losses tick-by-tick (Finding 2).
+            if self._on_cooldown is not None and status is not HedgeStatus.HEDGED:
+                self._on_cooldown(intent.pair_id)  # type: ignore[operator]
             # Paper records synchronously in this same tick, so the reservation
             # is added (approve) and freed (here) within one tick — a no-op that
             # keeps the reservation contract uniform across executors.
             if self._on_release is not None:
                 self._on_release(intent.pair_id)  # type: ignore[operator]
 
-    def _submit(self, intent: TradeIntent) -> None:
+    def _submit(self, intent: TradeIntent) -> HedgeStatus:
         params = self._fee_params
         now_ms = self._clock.wall_ms()
         self._counter += 1
@@ -137,7 +144,7 @@ class PaperExecutionEngine:
                 hedge_status=HedgeStatus.HEDGED, unwind_loss_micros=None,
                 opened_wall_ms=now_ms, resolves_at_ms=resolves,
             ))
-            return
+            return HedgeStatus.HEDGED
 
         if vy is None and vn is None:
             self._positions.record(PaperPosition(
@@ -149,7 +156,7 @@ class PaperExecutionEngine:
                 hedge_status=HedgeStatus.FAILED, unwind_loss_micros=None,
                 opened_wall_ms=now_ms, resolves_at_ms=resolves,
             ))
-            return
+            return HedgeStatus.FAILED
 
         # Exactly one leg filled -> forced unwind of that leg (§6.7 / §10).
         if vy is not None:
@@ -175,3 +182,4 @@ class PaperExecutionEngine:
             hedge_status=HedgeStatus.UNWOUND, unwind_loss_micros=loss,
             opened_wall_ms=now_ms, resolves_at_ms=resolves,
         ))
+        return HedgeStatus.UNWOUND

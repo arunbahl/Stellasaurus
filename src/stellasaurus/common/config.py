@@ -133,6 +133,13 @@ class Settings(BaseSettings):
 
     # --- safety gate ---
     live_trading_enabled: bool = False
+    # Re-entry cooldown after a non-hedged outcome (UNWOUND/FAILED) — damps
+    # loss-churn on a chronically half-filling pair.
+    reentry_cooldown_ms: int = 30_000
+    # In-flight reservation TTL: a non-held reservation older than this is
+    # presumed orphaned (executor died before recording) and purged. Far above
+    # real execution (~2s); HANGING holds are exempt.
+    reservation_ttl_ms: int = 30_000
 
     @property
     def kalshi_credentials_present(self) -> bool:

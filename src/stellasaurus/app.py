@@ -149,11 +149,15 @@ async def run(settings: Settings | None = None) -> None:
         positions_store = PositionsStore()
         positions_repo = PositionsRepo(db)
         pnl_repo = PnlRepo(db)
-        risk = RiskManager(state=store, positions=positions_store)
+        risk = RiskManager(
+            state=store, positions=positions_store,
+            cooldown_ms=settings.reentry_cooldown_ms,
+            reservation_ttl_ms=settings.reservation_ttl_ms,
+        )
         executor = PaperExecutionEngine(
             state=store, positions=positions_store, fee_params=fee_params,
             slippage_tolerance_bips=settings.slippage_tolerance_bips,
-            on_release=risk.release,
+            on_release=risk.release, on_cooldown=risk.cooldown,
         )
         halt = HaltController(
             store=store, positions=positions_store, audit_repo=audit_repo,
@@ -205,6 +209,9 @@ async def run(settings: Settings | None = None) -> None:
                     ),
                     flattener=flattener,
                     on_release=risk.release,
+                    on_hold=risk.mark_held,
+                    on_cooldown=risk.cooldown,
+                    on_reprice=risk.reprice,
                 )
                 executor = live_engine  # type: ignore[assignment]
                 live_flattener = flattener  # supervised after the supervisor exists

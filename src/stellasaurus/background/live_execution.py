@@ -51,6 +51,9 @@ class LiveExecutionEngine:
         halt: object | None = None,  # (reason: str) -> None, called on a hanging leg
         flattener: object | None = None,  # .enqueue(NakedLeg) auto-flatten sink
         on_release: object | None = None,  # (pair_id) -> None, frees the risk reservation
+        on_hold: object | None = None,  # (pair_id) -> None, mark reservation HANGING-held
+        on_cooldown: object | None = None,  # (pair_id) -> None, start re-entry cooldown
+        on_reprice: object | None = None,  # (pair_id, committed) -> None, refresh estimate
     ) -> None:
         self._state = state
         self._positions = positions
@@ -61,6 +64,9 @@ class LiveExecutionEngine:
         self._halt = halt
         self._flattener = flattener
         self._on_release = on_release
+        self._on_hold = on_hold
+        self._on_cooldown = on_cooldown
+        self._on_reprice = on_reprice
         self._queue: asyncio.Queue[TradeIntent] = asyncio.Queue(maxsize=64)
         self._counter = 0
 
@@ -143,6 +149,11 @@ class LiveExecutionEngine:
                 net_edge_micros=1_000_000 - (fresh_vy + fresh_vn),
                 created_mono_ns=intent.created_mono_ns,
             )
+            # Refresh the capital reservation to the re-quoted prices (Finding 4).
+            if self._on_reprice is not None:
+                self._on_reprice(  # type: ignore[operator]
+                    intent.pair_id, intent.qty * (fresh_vy + fresh_vn)
+                )
 
         yes_res, no_res = await asyncio.gather(
             self._gateways[intent.yes_venue].buy_fok(
@@ -188,6 +199,8 @@ class LiveExecutionEngine:
                 opened_wall_ms=self._clock.wall_ms(),
                 resolves_at_ms=entry.resolves_at_ms,
             ))
+            if self._on_cooldown is not None:
+                self._on_cooldown(intent.pair_id)  # type: ignore[operator]
             return False
 
         # Single leg filled -> forced unwind: sell it back as a marketable
@@ -224,6 +237,10 @@ class LiveExecutionEngine:
                 unwound = True
                 _log.warning("live_single_leg_unwound", pair_id=intent.pair_id,
                              venue=filled_venue.value, loss_micros=unwind_loss)
+                # Damp re-entry: a pair that just half-filled shouldn't re-fire
+                # on the next tick into a loss-churn loop (Finding 2).
+                if self._on_cooldown is not None:
+                    self._on_cooldown(intent.pair_id)  # type: ignore[operator]
                 break
 
         if not unwound:
@@ -235,6 +252,10 @@ class LiveExecutionEngine:
             )
             if self._halt is not None:
                 self._halt("hanging_leg")  # type: ignore[operator]
+            # Mark the reservation held so the TTL never purges a real naked
+            # leg's slot; the flattener frees it only once confirmed flat.
+            if self._on_hold is not None:
+                self._on_hold(intent.pair_id)  # type: ignore[operator]
             if self._flattener is not None:
                 # Hand the naked leg to the background flattener: it owns the
                 # position until the venue reports flat, and releases the risk

@@ -363,3 +363,61 @@ def test_reservations_enforce_max_open_pairs_across_pairs(tmp_path):
     assert risk.approve(i2) is False   # different pair, but max_open_pairs=1 incl. reservation
     risk.release("p1")
     assert risk.approve(i2) is True
+
+
+# --- Findings 2/3/4 hardening ---
+
+class _MonoClock:
+    def __init__(self): self.t = 1_000_000_000_000
+    def mono_ns(self): return self.t * 1_000_000
+    def wall_ms(self): return self.t
+
+
+def test_cooldown_blocks_reentry_after_nonhedged(tmp_path):
+    from stellasaurus.common.types import Venue
+    from stellasaurus.hot_path.seams import TradeIntent
+    risk, _ = _risk_fixture(tmp_path, max_open_pairs=5)
+    clk = _MonoClock()
+    risk._clock = clk  # deterministic time
+    i = TradeIntent("p1", "A", 1, Venue.KALSHI, Venue.POLYMARKET, 480_000, 500_000, 20_000, 0)
+    assert risk.approve(i) is True
+    risk.release("p1")
+    risk.cooldown("p1")                       # simulate an UNWOUND/FAILED outcome
+    assert risk.approve(i) is False
+    assert risk.decisions()[-1].rejected_by == "cooldown"
+    clk.t += 31_000                            # past the 30s window
+    assert risk.approve(i) is True
+
+
+def test_ttl_purges_orphaned_reservation_but_not_held(tmp_path):
+    from stellasaurus.common.types import Venue
+    from stellasaurus.hot_path.seams import TradeIntent
+    risk, _ = _risk_fixture(tmp_path, max_open_pairs=1)
+    clk = _MonoClock()
+    risk._clock = clk
+    i1 = TradeIntent("p1", "A", 1, Venue.KALSHI, Venue.POLYMARKET, 480_000, 500_000, 20_000, 0)
+    i2 = TradeIntent("p2", "A", 1, Venue.KALSHI, Venue.POLYMARKET, 480_000, 500_000, 20_000, 0)
+    assert risk.approve(i1) is True            # reserves p1 (in-flight)
+    assert risk.approve(i2) is False           # blocked by max_open_pairs=1
+    clk.t += 31_000                            # p1 reservation now orphaned (TTL)
+    assert risk.approve(i2) is True            # purge frees the slot
+    # a HELD (HANGING) reservation must NOT be purged
+    risk.release("p2")
+    assert risk.approve(i1) is True
+    risk.mark_held("p1")
+    clk.t += 100_000
+    assert risk.approve(i2) is False           # still blocked: held survives TTL
+    assert risk.decisions()[-1].rejected_by == "max_open_pairs"
+
+
+def test_reprice_updates_reserved_capital(tmp_path):
+    from stellasaurus.common.types import Venue
+    from stellasaurus.hot_path.seams import TradeIntent
+    # cap allows exactly one ~$1 pair with fee headroom; reprice higher blocks a 2nd
+    risk, _ = _risk_fixture(tmp_path, max_open_pairs=5, max_committed=2_100_000)
+    i1 = TradeIntent("p1", "A", 1, Venue.KALSHI, Venue.POLYMARKET, 480_000, 500_000, 20_000, 0)
+    i2 = TradeIntent("p2", "A", 1, Venue.KALSHI, Venue.POLYMARKET, 480_000, 500_000, 20_000, 0)
+    assert risk.approve(i1) is True            # reserves ~0.98*1.05 = ~1.03
+    risk.reprice("p1", 1_900_000)              # requote came back much pricier
+    assert risk.approve(i2) is False           # now the pool is nearly exhausted
+    assert risk.decisions()[-1].rejected_by == "max_committed_capital"
