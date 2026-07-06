@@ -29,7 +29,7 @@ from stellasaurus.background.subscription_mgr import SubscriptionManager
 from stellasaurus.common.clock import wall_ms
 from stellasaurus.common.config import Settings, load_settings
 from stellasaurus.common.logging import configure_logging, get_logger
-from stellasaurus.common.types import Venue
+from stellasaurus.common.types import OutcomePolarity, Venue
 from stellasaurus.control.app import create_app
 from stellasaurus.control.net import resolve_bind_hosts
 from stellasaurus.control.readmodel import ReadModel
@@ -162,10 +162,29 @@ async def run(settings: Settings | None = None) -> None:
             # credentials. Gateways are additionally self-gated per submit.
             if settings.kalshi_credentials_present and settings.poly_credentials_present:
                 from stellasaurus.background.live_execution import LiveExecutionEngine
+                from stellasaurus.hot_path.book import walk_book_for_size
                 from stellasaurus.venues.orders import (
                     KalshiOrderGateway,
                     PolymarketOrderGateway,
                 )
+
+                async def _requote(intent):  # noqa: ANN001, ANN202
+                    entry = store.registry().by_id.get(intent.pair_id)
+                    if entry is None:
+                        return None
+                    kb = await clients[Venue.KALSHI].get_book(entry.kalshi_ticker)
+                    pb = await clients[Venue.POLYMARKET].get_book(entry.poly_market_slug)
+                    if kb is None or pb is None:
+                        return None
+                    from stellasaurus.hot_path.normalize import normalize
+                    kn = normalize(kb, polarity=OutcomePolarity.DIRECT, pair_id=intent.pair_id)
+                    pn = normalize(pb, polarity=entry.outcome_polarity, pair_id=intent.pair_id)
+                    yes_b = kn if intent.yes_venue is Venue.KALSHI else pn
+                    no_b = pn if intent.yes_venue is Venue.KALSHI else kn
+                    vy = walk_book_for_size(yes_b.yes_asks, intent.qty)
+                    vn = walk_book_for_size(no_b.no_asks, intent.qty)
+                    return (vy, vn) if vy is not None and vn is not None else None
+
                 live_engine = LiveExecutionEngine(
                     state=store, positions=positions_store,
                     gateways={
@@ -173,6 +192,7 @@ async def run(settings: Settings | None = None) -> None:
                         Venue.POLYMARKET: PolymarketOrderGateway(settings, http),
                     },
                     slippage_tolerance_bips=settings.slippage_tolerance_bips,
+                    requote=_requote,
                 )
                 executor = live_engine  # type: ignore[assignment]
                 _log.warning("LIVE_TRADING_ENABLED", note="real orders will be placed")

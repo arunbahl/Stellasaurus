@@ -13,6 +13,7 @@ Per cycle:
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 
 from stellasaurus.common.logging import audit, get_logger
@@ -53,17 +54,17 @@ class CatalogSync:
         )
         series = sorted({t.split("-", 1)[0] for t in near})
         kalshi = self._clients[Venue.KALSHI]
+        batch: list[RawMarket] = []
         if series and hasattr(kalshi, "list_markets_for_series"):
             try:
-                for m in await kalshi.list_markets_for_series(series):
-                    self._upsert(m)
+                batch += await kalshi.list_markets_for_series(series)
             except Exception as exc:  # noqa: BLE001
                 _log.warning("priority_kalshi_failed", error=str(exc))
         try:
-            for m in await self._clients[Venue.POLYMARKET].list_markets():
-                self._upsert(m)
+            batch += await self._clients[Venue.POLYMARKET].list_markets()
         except Exception as exc:  # noqa: BLE001
             _log.warning("priority_poly_failed", error=str(exc))
+        await self._store_batch(batch)
         self._on_updated()
         _log.info("priority_synced", kalshi_series=len(series))
         return len(series)
@@ -80,14 +81,37 @@ class CatalogSync:
             except Exception as exc:  # noqa: BLE001 - one venue failing must not abort
                 _log.warning("catalog_list_failed", venue=venue.value, error=str(exc))
                 continue
-            for m in markets:
-                self._upsert(m)
+            await self._store_batch(markets)
         self.last_counts = self._markets.count_by_venue()
         from stellasaurus.common.clock import wall_ms
 
         self.last_sync_ms = wall_ms()
         self._on_updated()
         _log.info("catalog_synced", counts=self.last_counts)
+
+    async def _store_batch(self, markets: list[RawMarket]) -> None:
+        """Fingerprint + batch-upsert in a worker thread so the event loop keeps
+        serving the WS feeds (per-row commits at catalog scale starved them,
+        rotting books while freshness looked fine — found via Stage-2 misses)."""
+        if not markets:
+            return
+        rows = [
+            MarketRow(
+                venue=m.venue, native_id=m.native_id, title=m.title,
+                rules_text=m.rules_text, settlement_source=m.settlement_source,
+                resolves_at_ms=m.resolves_at_ms, status=m.status,
+                terms_fingerprint=market_fingerprint(m),
+            )
+            for m in markets
+        ]
+        changed = await asyncio.to_thread(self._markets.upsert_many, rows)
+        for venue_str, native_id in changed:
+            kt = native_id if venue_str == Venue.KALSHI.value else None
+            ps = native_id if venue_str == Venue.POLYMARKET.value else None
+            for pair_id in self._registry.pairs_referencing(kalshi_ticker=kt, poly_slug=ps):
+                self._registry.set_status(pair_id, PairStatus.STALE)
+                audit(self._audit, actor="catalog_sync", event_type="TERMS_CHANGED",
+                      pair_id=pair_id, venue=venue_str, native_id=native_id)
 
     def _upsert(self, m: RawMarket) -> None:
         fp = market_fingerprint(m)

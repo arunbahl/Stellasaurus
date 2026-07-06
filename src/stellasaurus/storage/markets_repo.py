@@ -72,6 +72,42 @@ class MarketsRepo:
             return prior_fp
         return None
 
+    def upsert_many(self, markets: list[MarketRow]) -> list[tuple[str, str]]:
+        """Batch upsert in ONE transaction (a per-row connect/commit at catalog
+        scale blocked the event loop for seconds and starved the WS feeds).
+        Returns [(venue, native_id)] whose terms_fingerprint changed."""
+        if not markets:
+            return []
+        now = wall_ms()
+        changed: list[tuple[str, str]] = []
+        with self._db.connect() as conn:
+            for m in markets:
+                prior = conn.execute(
+                    "SELECT terms_fingerprint FROM markets WHERE venue=? AND native_id=?",
+                    (m.venue.value, m.native_id),
+                ).fetchone()
+                if prior and prior["terms_fingerprint"] != m.terms_fingerprint:
+                    changed.append((m.venue.value, m.native_id))
+                conn.execute(
+                    """
+                    INSERT INTO markets (venue, native_id, title, rules_text, settlement_source,
+                                         resolves_at_ms, status, terms_fingerprint, raw_json,
+                                         first_seen_ms, updated_ms)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                    ON CONFLICT(venue, native_id) DO UPDATE SET
+                        title=excluded.title, rules_text=excluded.rules_text,
+                        settlement_source=excluded.settlement_source,
+                        resolves_at_ms=excluded.resolves_at_ms, status=excluded.status,
+                        terms_fingerprint=excluded.terms_fingerprint,
+                        raw_json=excluded.raw_json, updated_ms=excluded.updated_ms
+                    """,
+                    (m.venue.value, m.native_id, m.title, m.rules_text,
+                     m.settlement_source, m.resolves_at_ms, m.status,
+                     m.terms_fingerprint, m.raw_json, now, now),
+                )
+            conn.commit()
+        return changed
+
     def get(self, venue: Venue, native_id: str) -> MarketRow | None:
         with self._db.connect() as conn:
             row = conn.execute(

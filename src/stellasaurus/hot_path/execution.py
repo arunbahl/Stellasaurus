@@ -87,7 +87,9 @@ class PaperExecutionEngine:
         self._fee_params = params
 
     def _limit(self, intent_price: Micros) -> Micros:
-        return intent_price + (intent_price * self._slip_bips) // 10_000
+        # Same tick-floor pad as the live engine (2 ticks minimum).
+        pad = max((intent_price * self._slip_bips) // 10_000, 20_000)
+        return intent_price + pad
 
     def submit(self, intent: TradeIntent) -> None:
         params = self._fee_params

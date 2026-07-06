@@ -47,12 +47,14 @@ class LiveExecutionEngine:
         gateways: dict[Venue, OrderGateway],
         slippage_tolerance_bips: int,
         clock: Clock | None = None,
+        requote: object | None = None,  # async (intent) -> (vy, vn) micros or None
     ) -> None:
         self._state = state
         self._positions = positions
         self._gateways = gateways
         self._slip_bips = slippage_tolerance_bips
         self._clock = clock or SystemClock()
+        self._requote = requote
         self._queue: asyncio.Queue[TradeIntent] = asyncio.Queue(maxsize=64)
         self._counter = 0
 
@@ -75,7 +77,10 @@ class LiveExecutionEngine:
                 _log.error("live_execution_error", pair_id=intent.pair_id, error=str(exc))
 
     def _limit(self, price: Micros) -> Micros:
-        return price + (price * self._slip_bips) // 10_000
+        # Pad must survive cent-tick flooring (validated live: a sub-tick pad
+        # made FOK require an unmoved book) — floor of 2 ticks.
+        pad = max((price * self._slip_bips) // 10_000, 20_000)
+        return price + pad
 
     async def _execute(self, intent: TradeIntent) -> None:
         entry = self._state.registry().by_id.get(intent.pair_id)
@@ -91,6 +96,30 @@ class LiveExecutionEngine:
 
         yes_native, yes_pol = leg(intent.yes_venue)
         no_native, no_pol = leg(intent.no_venue)
+
+        # Pre-trade re-quote: never fire on in-memory books that may have rotted
+        # (found live: event-loop starvation left books minutes stale while
+        # feed-level freshness looked fine — two 8.4c unwinds taught this).
+        if self._requote is not None:
+            fresh = await self._requote(intent)  # type: ignore[operator]
+            if fresh is None:
+                _log.warning("live_requote_abort", pair_id=intent.pair_id)
+                return
+            fresh_vy, fresh_vn = fresh
+            if fresh_vy + fresh_vn > intent.vwap_yes_micros + intent.vwap_no_micros + 20_000:
+                _log.warning(
+                    "live_requote_edge_gone", pair_id=intent.pair_id,
+                    intent_cost=intent.vwap_yes_micros + intent.vwap_no_micros,
+                    fresh_cost=fresh_vy + fresh_vn,
+                )
+                return
+            intent = TradeIntent(
+                pair_id=intent.pair_id, orientation=intent.orientation,
+                qty=intent.qty, yes_venue=intent.yes_venue, no_venue=intent.no_venue,
+                vwap_yes_micros=fresh_vy, vwap_no_micros=fresh_vn,
+                net_edge_micros=1_000_000 - (fresh_vy + fresh_vn),
+                created_mono_ns=intent.created_mono_ns,
+            )
 
         yes_res, no_res = await asyncio.gather(
             self._gateways[intent.yes_venue].buy_fok(

@@ -112,7 +112,7 @@ class Settings(BaseSettings):
 
     # --- fee params (used Phase 3; cached now) ---
     kalshi_fee_multiplier_default: float = 0.07
-    kalshi_balance_precision_micros: int = 10_000  # $0.01 standard account
+    kalshi_balance_precision_micros: int = 100  # $0.0001 (validated live: fee 0.0167)
     poly_taker_fee_coefficient: float = 0.06  # quadratic: fee = coeff*C*p*(1-p)
     poly_maker_fee_coefficient: float = -0.0125  # negative = maker rebate
     fee_divergence_tolerance_micros: int = 10_000
