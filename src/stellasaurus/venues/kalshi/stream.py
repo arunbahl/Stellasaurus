@@ -20,7 +20,7 @@ import websockets
 from stellasaurus.common.clock import mono_ns, wall_ms
 from stellasaurus.common.config import Settings
 from stellasaurus.common.logging import get_logger
-from stellasaurus.common.money import cents_to_micros
+from stellasaurus.common.money import cents_to_micros, dollars_to_micros
 from stellasaurus.common.types import Venue
 from stellasaurus.hot_path.book import NativeBook, PriceLevel
 from stellasaurus.venues.base import FeedStats, OnBook
@@ -70,6 +70,25 @@ class KalshiStream:
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, 30.0)
 
+    @staticmethod
+    def _price_micros(value: object) -> int | None:
+        """Dollar-string ('0.0100') or integer-cents price -> micros."""
+        try:
+            if isinstance(value, str):
+                return dollars_to_micros(value)
+            if isinstance(value, int):
+                return cents_to_micros(value)
+        except Exception:  # noqa: BLE001
+            return None
+        return None
+
+    @staticmethod
+    def _size(value: object) -> int:
+        try:
+            return int(round(float(value)))  # sizes may be fractional strings
+        except (TypeError, ValueError):
+            return 0
+
     def _handle(self, raw: str | bytes, on_book: OnBook) -> None:
         msg = json.loads(raw)
         msg_type = msg.get("type")
@@ -78,16 +97,29 @@ class KalshiStream:
         if not ticker:
             return
         if msg_type == "orderbook_snapshot":
-            book = {"yes": {}, "no": {}}
+            # Live shape (validated 2026-07-06): yes_dollars_fp/no_dollars_fp with
+            # [price_dollars_str, size_str]; legacy integer-cents yes/no handled too.
+            book: dict[str, dict[int, int]] = {"yes": {}, "no": {}}
             for side in ("yes", "no"):
-                for price_cents, size in data.get(side, []) or []:
-                    book[side][cents_to_micros(int(price_cents))] = int(size)
+                ladder = data.get(f"{side}_dollars_fp") or data.get(side) or []
+                for item in ladder:
+                    price = self._price_micros(item[0])
+                    size = self._size(item[1])
+                    if price is not None and size > 0:
+                        book[side][price] = size
             self._books[ticker] = book
         elif msg_type == "orderbook_delta":
             book = self._books.setdefault(ticker, {"yes": {}, "no": {}})
-            side = data.get("side")
-            price = cents_to_micros(int(data["price"]))
-            delta = int(data.get("delta", 0))
+            side = str(data.get("side") or "")
+            if side not in ("yes", "no"):
+                return
+            price = self._price_micros(
+                data.get("price_dollars_fp") or data.get("price_dollars")
+                or data.get("price")
+            )
+            if price is None:
+                return
+            delta = self._size(data.get("delta_fp") or data.get("delta") or 0)
             new_size = book.get(side, {}).get(price, 0) + delta
             if new_size <= 0:
                 book.setdefault(side, {}).pop(price, None)
