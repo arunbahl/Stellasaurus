@@ -45,7 +45,7 @@ class OutcomePolarity(str, Enum):
     INVERTED = "INVERTED"
 
 # #########################################################################
-# Generated classes (4)
+# Generated classes (2)
 # #########################################################################
 
 class Contract(BaseModel):
@@ -55,25 +55,10 @@ class Contract(BaseModel):
     settlement_source: typing.Optional[str] = None
     resolves_at_ms: typing.Optional[int] = None
 
-class ContractCriteria(BaseModel):
-    proposition: str = Field(description='The precise event/threshold judged, e.g. \'CPI YoY > 3.0%\'.')
-    settlement_source: str = Field(description='The authority/dataset/index/exchange/station that determines the outcome.')
-    timing_cutoff: str = Field(description='Exact observation time, release date, or settlement window incl. time zone; whether revisions count.')
-    edge_case_rules: str = Field(description='Postponement, cancellation, ties, early resolution, scheduled-vs-actual, void/refund rules.')
-
-class DimensionMatch(BaseModel):
-    proposition: bool
-    settlement_source: bool
-    timing_cutoff: bool
-    edge_case_rules: bool
-
 class EquivalenceVerdict(BaseModel):
-    contract_a_criteria: "ContractCriteria"
-    contract_b_criteria: "ContractCriteria"
-    dimension_match: "DimensionMatch"
-    equivalent: bool = Field(description='True ONLY if every dimension_match field is true.')
+    equivalent: bool = Field(description='True ONLY if the two contracts resolve identically in every possible outcome.')
     outcome_polarity: OutcomePolarity
-    rationale: str
+    reason: str = Field(description='One or two sentences: the decisive match, or the specific mismatch/ambiguity.')
 
 # #########################################################################
 # Generated type aliases (0)

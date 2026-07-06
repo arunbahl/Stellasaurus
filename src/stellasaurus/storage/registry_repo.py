@@ -67,6 +67,15 @@ class RegistryRepo:
             rows = conn.execute("SELECT * FROM pair_registry").fetchall()
         return [_to_entry(r) for r in rows]
 
+    def find_by_legs(self, kalshi_ticker: str, poly_slug: str) -> str | None:
+        """pair_id of an existing entry with exactly these two legs, else None."""
+        with self._db.connect() as conn:
+            row = conn.execute(
+                "SELECT pair_id FROM pair_registry WHERE kalshi_ticker=? AND poly_market_slug=?",
+                (kalshi_ticker, poly_slug),
+            ).fetchone()
+        return row["pair_id"] if row else None
+
     def pairs_referencing(self, *, kalshi_ticker: str | None, poly_slug: str | None) -> list[str]:
         """pair_ids that reference a given native market (for STALE propagation)."""
         with self._db.connect() as conn:

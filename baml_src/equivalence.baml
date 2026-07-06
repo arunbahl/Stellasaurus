@@ -1,10 +1,11 @@
-// Resolution-equivalence acceptance-criteria evaluation (DESIGN §6.2).
-// The model EXTRACTS each contract's acceptance criteria, then compares them
-// dimension-by-dimension. `equivalent` is the boolean conjunction of all four
-// dimension matches — there is no confidence score.
+// Resolution-equivalence evaluation (DESIGN §6.2), simplified schema.
+//
+// The model still CHECKS the four acceptance-criteria dimensions (proposition,
+// settlement source, timing/cutoff, edge cases) — but reports only the verdict,
+// the polarity, and a short reason. The heavyweight per-dimension extraction
+// schema proved harder for models to emit reliably than the judgment itself.
 
-// Typed input: one contract's catalog fields. Rendering lives in the prompt
-// (BAML), not in Python, so the LLM sees a consistent, structured description.
+// Typed input: one contract's catalog fields.
 class Contract {
   native_id string
   title string
@@ -13,80 +14,62 @@ class Contract {
   resolves_at_ms int?
 }
 
-class ContractCriteria {
-  proposition string       @description("The precise event/threshold judged, e.g. 'CPI YoY > 3.0%'.")
-  settlement_source string @description("The authority/dataset/index/exchange/station that determines the outcome.")
-  timing_cutoff string     @description("Exact observation time, release date, or settlement window incl. time zone; whether revisions count.")
-  edge_case_rules string   @description("Postponement, cancellation, ties, early resolution, scheduled-vs-actual, void/refund rules.")
-}
-
-class DimensionMatch {
-  proposition bool
-  settlement_source bool
-  timing_cutoff bool
-  edge_case_rules bool
-}
-
 enum OutcomePolarity {
   DIRECT   @description("Contract B's YES means the same as Contract A's YES.")
   INVERTED @description("Contract B's YES means Contract A's NO.")
 }
 
 class EquivalenceVerdict {
-  contract_a_criteria ContractCriteria
-  contract_b_criteria ContractCriteria
-  dimension_match DimensionMatch
-  equivalent bool          @description("True ONLY if every dimension_match field is true.")
+  equivalent bool @description("True ONLY if the two contracts resolve identically in every possible outcome.")
   outcome_polarity OutcomePolarity
-  rationale string
+  reason string @description("One or two sentences: the decisive match, or the specific mismatch/ambiguity.")
 }
 
 function EvaluateEquivalence(contract_a: Contract, contract_b: Contract) -> EquivalenceVerdict {
   client Fireworks_DeepSeekV4Flash
   prompt #"
-    You compare two binary event contracts to decide whether they resolve on the
-    SAME acceptance criteria, so that holding offsetting legs forms a risk-free
-    locked position. Be strict: a "locked" position built on a wrong equivalence
-    verdict becomes unhedged risk.
+    You compare two binary event contracts from different exchanges to decide
+    whether they resolve on the SAME acceptance criteria, so that holding
+    offsetting legs forms a risk-free locked position. Be strict: a "locked"
+    position built on a wrong equivalence verdict becomes unhedged risk.
 
-    For EACH contract independently, extract its acceptance criteria:
-      - proposition / outcome judged (the precise event and threshold)
-      - settlement source / reference (which authority, dataset, release, index,
-        exchange, or station determines the outcome)
-      - timing / cutoff / expiration (exact time incl. time zone; whether
-        post-print revisions count)
-      - edge-case and void rules (postponement, cancellation, ties, early
-        resolution, scheduled-vs-actual, refund conditions)
+    Check all four dimensions:
+      1. Proposition: the precise event and threshold judged (e.g. "> 3.0%" vs
+         ">= 3.0%" is a mismatch; note integer-reported quantities can make
+         different-looking thresholds identical).
+      2. Settlement source: which authority, dataset, index, exchange, or station
+         determines the outcome.
+      3. Timing/cutoff: observation date/window, time zone, whether revisions count.
+      4. Edge cases: postponement, cancellation, ties, early resolution, void rules.
 
-    Then compare the two contracts dimension by dimension. Set each
-    dimension_match field true ONLY if the two contracts match on that dimension.
-    Trivial wording differences that do not change resolution are still a match;
-    any substantive difference, or ambiguity you cannot resolve from the text, is
-    NOT a match.
+    `equivalent` is true ONLY if all four match (allowing wording differences
+    that cannot change resolution). Any substantive difference, or ambiguity you
+    cannot resolve from the text, means false.
 
-    Set `equivalent` true ONLY if all four dimension_match fields are true.
-
-    Set `outcome_polarity`: DIRECT if Contract B's YES means the same as Contract
-    A's YES; INVERTED if Contract B's YES corresponds to Contract A's NO (e.g. the
-    two contracts back opposite sides of the same two-outcome event).
+    `outcome_polarity`: DIRECT if B's YES asserts the same outcome as A's YES;
+    INVERTED if B's YES asserts A's NO (opposite sides of the same two-outcome
+    event).
 
     {{ ctx.output_format }}
 
-    {% for c in [contract_a, contract_b] %}
-    Contract {{ "A" if loop.first else "B" }}:
-      title: {{ c.title }}
-      native_id: {{ c.native_id }}
-      resolution_rules: {{ c.rules_text }}
-      settlement_source: {{ c.settlement_source }}
-      resolves_at_ms: {{ c.resolves_at_ms }}
-    {% endfor %}
+    Contract A:
+      title: {{ contract_a.title }}
+      native_id: {{ contract_a.native_id }}
+      resolution_rules: {{ contract_a.rules_text }}
+      settlement_source: {{ contract_a.settlement_source }}
+      resolves_at_ms: {{ contract_a.resolves_at_ms }}
+
+    Contract B:
+      title: {{ contract_b.title }}
+      native_id: {{ contract_b.native_id }}
+      resolution_rules: {{ contract_b.rules_text }}
+      settlement_source: {{ contract_b.settlement_source }}
+      resolves_at_ms: {{ contract_b.resolves_at_ms }}
   "#
 }
 
 // ----------------------------------------------------------------------------
-// Golden-set tests — run from the VSCode BAML UI (needs FIREWORKS_API_KEY_BAML).
-// Cover sports (trivial), economics, weather, crypto with both EQUIVALENT and
-// NOT_EQUIVALENT outcomes (DESIGN §11). `this` is the function's return value.
+// Golden-set tests — runnable from the VSCode BAML UI (needs FIREWORKS_* env).
 // ----------------------------------------------------------------------------
 
 test sports_moneyline_direct_equivalent {
@@ -133,25 +116,26 @@ test sports_opposite_side_inverted_equivalent {
   @@assert(polarity_inverted, {{ this.outcome_polarity == "INVERTED" }})
 }
 
-test economics_identical_equivalent {
+test weather_bracket_equivalent_integer_reporting {
   functions [EvaluateEquivalence]
   args {
     contract_a {
-      native_id "KXCPI"
-      title "US CPI YoY above 3.0% for May 2026?"
-      rules_text "YES if the BLS CPI-U headline year-over-year inflation for May 2026, first print, is greater than 3.0%."
-      settlement_source "US BLS CPI-U (NSA), first release"
-      resolves_at_ms 1781913600000
+      native_id "KXHIGHNY-26JUL05-T84"
+      title "NYC high temp: 83° or below?"
+      rules_text "If the highest temperature recorded in Central Park, New York for July 05, 2026 as reported by the National Weather Service's Climatological Report (Daily), is less than 84°, then the market resolves to Yes."
+      settlement_source "NWS Climatological Report (Daily), Central Park"
+      resolves_at_ms 1783400340000
     }
     contract_b {
-      native_id "cpi-may-3pct"
-      title "CPI year-over-year > 3.0% (May 2026)"
-      rules_text "Resolves YES if the initial BLS CPI-U headline YoY figure for May 2026 exceeds 3.0%."
-      settlement_source "US BLS CPI-U (NSA), first release"
-      resolves_at_ms 1781913600000
+      native_id "tc-temp-nychigh-2026-07-05-lt84f"
+      title "Highest temperature in NYC on July 5?"
+      rules_text "Will the highest temperature recorded at Central Park (KNYC) in New York City for 2026-07-05 as reported by the National Weather Service's Climatological Report (Daily) be less than or equal to 83F?"
+      settlement_source "NWS Climatological Report (Daily), Central Park (KNYC)"
+      resolves_at_ms 1783400400000
     }
   }
   @@assert(is_equivalent, {{ this.equivalent }})
+  @@assert(polarity_direct, {{ this.outcome_polarity == "DIRECT" }})
 }
 
 test weather_threshold_mismatch_not_equivalent {
@@ -172,7 +156,7 @@ test weather_threshold_mismatch_not_equivalent {
       resolves_at_ms 1782000000000
     }
   }
-  // Strict > vs >= is a substantive proposition difference -> not equivalent.
+  // > 75 vs >= 75 differ exactly at 75, an outcome NWS integer reporting CAN produce.
   @@assert(not_equivalent, {{ not this.equivalent }})
 }
 
@@ -194,6 +178,5 @@ test crypto_settlement_source_mismatch_not_equivalent {
       resolves_at_ms 1798761540000
     }
   }
-  // Different reference exchange (and quote/timezone) -> not equivalent.
   @@assert(not_equivalent, {{ not this.equivalent }})
 }

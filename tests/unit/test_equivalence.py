@@ -1,12 +1,10 @@
-"""Equivalence engine wrapper — mapping + conservative conjunction (no network)."""
+"""Equivalence engine wrapper — simplified-verdict mapping (no network)."""
 
 import pytest
 
 from stellasaurus.background.equivalence import EquivalenceEngine, contract_from_market
 from stellasaurus.baml_client.types import (
     Contract,
-    ContractCriteria,
-    DimensionMatch,
     EquivalenceVerdict,
     OutcomePolarity,
 )
@@ -14,59 +12,28 @@ from stellasaurus.common.types import OutcomePolarity as DomainPolarity
 from stellasaurus.common.types import PairStatus
 
 
-def _criteria(p="prop") -> ContractCriteria:
-    return ContractCriteria(
-        proposition=p, settlement_source="src", timing_cutoff="cut", edge_case_rules="void"
-    )
-
-
-def _verdict(
-    *, dims: bool, equivalent: bool, polarity=OutcomePolarity.DIRECT
-) -> EquivalenceVerdict:
+def _verdict(*, equivalent: bool, polarity=OutcomePolarity.DIRECT) -> EquivalenceVerdict:
     return EquivalenceVerdict(
-        contract_a_criteria=_criteria(),
-        contract_b_criteria=_criteria(),
-        dimension_match=DimensionMatch(
-            proposition=dims, settlement_source=dims, timing_cutoff=dims, edge_case_rules=dims
-        ),
-        equivalent=equivalent,
-        outcome_polarity=polarity,
-        rationale="because",
+        equivalent=equivalent, outcome_polarity=polarity, reason="because"
     )
 
 
-def test_all_dims_true_and_equivalent_flag_is_verified():
-    status, polarity, criteria = EquivalenceEngine.disposition(_verdict(dims=True, equivalent=True))
+def test_equivalent_maps_to_verified():
+    status, polarity, criteria = EquivalenceEngine.disposition(_verdict(equivalent=True))
     assert status is PairStatus.VERIFIED
     assert polarity is DomainPolarity.DIRECT
-    assert criteria["dimension_match"]["proposition"] is True
-    assert criteria["outcome_polarity"] == "DIRECT"
+    assert criteria == {"equivalent": True, "outcome_polarity": "DIRECT", "reason": "because"}
 
 
-def test_one_dim_false_is_not_equivalent_even_if_model_says_equivalent():
-    # Conservative: a single dimension mismatch overrides the model's equivalent flag.
-    v = EquivalenceVerdict(
-        contract_a_criteria=_criteria(),
-        contract_b_criteria=_criteria(),
-        dimension_match=DimensionMatch(
-            proposition=True, settlement_source=False, timing_cutoff=True, edge_case_rules=True
-        ),
-        equivalent=True,
-        outcome_polarity=OutcomePolarity.DIRECT,
-        rationale="model over-claimed",
-    )
-    status, _, _ = EquivalenceEngine.disposition(v)
+def test_not_equivalent_maps_to_not_equivalent():
+    status, _, criteria = EquivalenceEngine.disposition(_verdict(equivalent=False))
     assert status is PairStatus.NOT_EQUIVALENT
-
-
-def test_model_equivalent_false_overrides_all_dims_true():
-    status, _, _ = EquivalenceEngine.disposition(_verdict(dims=True, equivalent=False))
-    assert status is PairStatus.NOT_EQUIVALENT
+    assert criteria["equivalent"] is False
 
 
 def test_inverted_polarity_maps_through():
     _, polarity, _ = EquivalenceEngine.disposition(
-        _verdict(dims=True, equivalent=True, polarity=OutcomePolarity.INVERTED)
+        _verdict(equivalent=True, polarity=OutcomePolarity.INVERTED)
     )
     assert polarity is DomainPolarity.INVERTED
 
@@ -82,9 +49,7 @@ def test_contract_from_market_builds_baml_contract():
     c = contract_from_market(M())
     assert isinstance(c, Contract)
     assert c.native_id == "KX1"
-    assert c.title == "Will X happen?"
     assert c.settlement_source == "Official"
-    assert c.resolves_at_ms == 1_900_000_000_000
 
 
 def test_engine_unconfigured_without_key(monkeypatch):

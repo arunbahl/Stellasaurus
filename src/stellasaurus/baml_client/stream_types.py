@@ -23,7 +23,7 @@ class StreamState(BaseModel, typing.Generic[StreamStateValueT]):
     value: StreamStateValueT
     state: typing_extensions.Literal["Pending", "Incomplete", "Complete"]
 # #########################################################################
-# Generated classes (4)
+# Generated classes (2)
 # #########################################################################
 
 class Contract(BaseModel):
@@ -33,25 +33,10 @@ class Contract(BaseModel):
     settlement_source: typing.Optional[str] = None
     resolves_at_ms: typing.Optional[int] = None
 
-class ContractCriteria(BaseModel):
-    proposition: typing.Optional[str] = Field(default=None, description='The precise event/threshold judged, e.g. \'CPI YoY > 3.0%\'.')
-    settlement_source: typing.Optional[str] = Field(default=None, description='The authority/dataset/index/exchange/station that determines the outcome.')
-    timing_cutoff: typing.Optional[str] = Field(default=None, description='Exact observation time, release date, or settlement window incl. time zone; whether revisions count.')
-    edge_case_rules: typing.Optional[str] = Field(default=None, description='Postponement, cancellation, ties, early resolution, scheduled-vs-actual, void/refund rules.')
-
-class DimensionMatch(BaseModel):
-    proposition: typing.Optional[bool] = None
-    settlement_source: typing.Optional[bool] = None
-    timing_cutoff: typing.Optional[bool] = None
-    edge_case_rules: typing.Optional[bool] = None
-
 class EquivalenceVerdict(BaseModel):
-    contract_a_criteria: typing.Optional["ContractCriteria"] = None
-    contract_b_criteria: typing.Optional["ContractCriteria"] = None
-    dimension_match: typing.Optional["DimensionMatch"] = None
-    equivalent: typing.Optional[bool] = Field(default=None, description='True ONLY if every dimension_match field is true.')
+    equivalent: typing.Optional[bool] = Field(default=None, description='True ONLY if the two contracts resolve identically in every possible outcome.')
     outcome_polarity: typing.Optional[types.OutcomePolarity] = None
-    rationale: typing.Optional[str] = None
+    reason: typing.Optional[str] = Field(default=None, description='One or two sentences: the decisive match, or the specific mismatch/ambiguity.')
 
 # #########################################################################
 # Generated type aliases (0)

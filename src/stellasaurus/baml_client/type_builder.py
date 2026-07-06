@@ -20,7 +20,7 @@ from .globals import DO_NOT_USE_DIRECTLY_UNLESS_YOU_KNOW_WHAT_YOURE_DOING_RUNTIM
 class TypeBuilder(type_builder.TypeBuilder):
     def __init__(self):
         super().__init__(classes=set(
-          ["Contract","ContractCriteria","DimensionMatch","EquivalenceVerdict",]
+          ["Contract","EquivalenceVerdict",]
         ), enums=set(
           ["OutcomePolarity",]
         ), runtime=DO_NOT_USE_DIRECTLY_UNLESS_YOU_KNOW_WHAT_YOURE_DOING_RUNTIME)
@@ -35,20 +35,12 @@ class TypeBuilder(type_builder.TypeBuilder):
 
 
     # #########################################################################
-    # Generated classes 4
+    # Generated classes 2
     # #########################################################################
 
     @property
     def Contract(self) -> "ContractViewer":
         return ContractViewer(self)
-
-    @property
-    def ContractCriteria(self) -> "ContractCriteriaViewer":
-        return ContractCriteriaViewer(self)
-
-    @property
-    def DimensionMatch(self) -> "DimensionMatchViewer":
-        return DimensionMatchViewer(self)
 
     @property
     def EquivalenceVerdict(self) -> "EquivalenceVerdictViewer":
@@ -104,7 +96,7 @@ class OutcomePolarityValues:
 
 
 # #########################################################################
-# Generated classes 4
+# Generated classes 2
 # #########################################################################
 
 class ContractAst:
@@ -162,113 +154,11 @@ class ContractProperties:
     
 
 
-class ContractCriteriaAst:
-    def __init__(self, tb: type_builder.TypeBuilder):
-        _tb = tb._tb # type: ignore (we know how to use this private attribute)
-        self._bldr = _tb.class_("ContractCriteria")
-        self._properties: typing.Set[str] = set([  "proposition",  "settlement_source",  "timing_cutoff",  "edge_case_rules",  ])
-        self._props = ContractCriteriaProperties(self._bldr, self._properties)
-
-    def type(self) -> baml_py.FieldType:
-        return self._bldr.field()
-
-    @property
-    def props(self) -> "ContractCriteriaProperties":
-        return self._props
-
-
-class ContractCriteriaViewer(ContractCriteriaAst):
-    def __init__(self, tb: type_builder.TypeBuilder):
-        super().__init__(tb)
-
-    
-    def list_properties(self) -> typing.List[typing.Tuple[str, type_builder.ClassPropertyViewer]]:
-        return [(name, type_builder.ClassPropertyViewer(self._bldr.property(name))) for name in self._properties]
-    
-
-
-class ContractCriteriaProperties:
-    def __init__(self, bldr: baml_py.ClassBuilder, properties: typing.Set[str]):
-        self.__bldr = bldr
-        self.__properties = properties # type: ignore (we know how to use this private attribute) # noqa: F821
-
-    
-    
-    @property
-    def proposition(self) -> type_builder.ClassPropertyViewer:
-        return type_builder.ClassPropertyViewer(self.__bldr.property("proposition"))
-    
-    @property
-    def settlement_source(self) -> type_builder.ClassPropertyViewer:
-        return type_builder.ClassPropertyViewer(self.__bldr.property("settlement_source"))
-    
-    @property
-    def timing_cutoff(self) -> type_builder.ClassPropertyViewer:
-        return type_builder.ClassPropertyViewer(self.__bldr.property("timing_cutoff"))
-    
-    @property
-    def edge_case_rules(self) -> type_builder.ClassPropertyViewer:
-        return type_builder.ClassPropertyViewer(self.__bldr.property("edge_case_rules"))
-    
-    
-
-
-class DimensionMatchAst:
-    def __init__(self, tb: type_builder.TypeBuilder):
-        _tb = tb._tb # type: ignore (we know how to use this private attribute)
-        self._bldr = _tb.class_("DimensionMatch")
-        self._properties: typing.Set[str] = set([  "proposition",  "settlement_source",  "timing_cutoff",  "edge_case_rules",  ])
-        self._props = DimensionMatchProperties(self._bldr, self._properties)
-
-    def type(self) -> baml_py.FieldType:
-        return self._bldr.field()
-
-    @property
-    def props(self) -> "DimensionMatchProperties":
-        return self._props
-
-
-class DimensionMatchViewer(DimensionMatchAst):
-    def __init__(self, tb: type_builder.TypeBuilder):
-        super().__init__(tb)
-
-    
-    def list_properties(self) -> typing.List[typing.Tuple[str, type_builder.ClassPropertyViewer]]:
-        return [(name, type_builder.ClassPropertyViewer(self._bldr.property(name))) for name in self._properties]
-    
-
-
-class DimensionMatchProperties:
-    def __init__(self, bldr: baml_py.ClassBuilder, properties: typing.Set[str]):
-        self.__bldr = bldr
-        self.__properties = properties # type: ignore (we know how to use this private attribute) # noqa: F821
-
-    
-    
-    @property
-    def proposition(self) -> type_builder.ClassPropertyViewer:
-        return type_builder.ClassPropertyViewer(self.__bldr.property("proposition"))
-    
-    @property
-    def settlement_source(self) -> type_builder.ClassPropertyViewer:
-        return type_builder.ClassPropertyViewer(self.__bldr.property("settlement_source"))
-    
-    @property
-    def timing_cutoff(self) -> type_builder.ClassPropertyViewer:
-        return type_builder.ClassPropertyViewer(self.__bldr.property("timing_cutoff"))
-    
-    @property
-    def edge_case_rules(self) -> type_builder.ClassPropertyViewer:
-        return type_builder.ClassPropertyViewer(self.__bldr.property("edge_case_rules"))
-    
-    
-
-
 class EquivalenceVerdictAst:
     def __init__(self, tb: type_builder.TypeBuilder):
         _tb = tb._tb # type: ignore (we know how to use this private attribute)
         self._bldr = _tb.class_("EquivalenceVerdict")
-        self._properties: typing.Set[str] = set([  "contract_a_criteria",  "contract_b_criteria",  "dimension_match",  "equivalent",  "outcome_polarity",  "rationale",  ])
+        self._properties: typing.Set[str] = set([  "equivalent",  "outcome_polarity",  "reason",  ])
         self._props = EquivalenceVerdictProperties(self._bldr, self._properties)
 
     def type(self) -> baml_py.FieldType:
@@ -297,18 +187,6 @@ class EquivalenceVerdictProperties:
     
     
     @property
-    def contract_a_criteria(self) -> type_builder.ClassPropertyViewer:
-        return type_builder.ClassPropertyViewer(self.__bldr.property("contract_a_criteria"))
-    
-    @property
-    def contract_b_criteria(self) -> type_builder.ClassPropertyViewer:
-        return type_builder.ClassPropertyViewer(self.__bldr.property("contract_b_criteria"))
-    
-    @property
-    def dimension_match(self) -> type_builder.ClassPropertyViewer:
-        return type_builder.ClassPropertyViewer(self.__bldr.property("dimension_match"))
-    
-    @property
     def equivalent(self) -> type_builder.ClassPropertyViewer:
         return type_builder.ClassPropertyViewer(self.__bldr.property("equivalent"))
     
@@ -317,8 +195,8 @@ class EquivalenceVerdictProperties:
         return type_builder.ClassPropertyViewer(self.__bldr.property("outcome_polarity"))
     
     @property
-    def rationale(self) -> type_builder.ClassPropertyViewer:
-        return type_builder.ClassPropertyViewer(self.__bldr.property("rationale"))
+    def reason(self) -> type_builder.ClassPropertyViewer:
+        return type_builder.ClassPropertyViewer(self.__bldr.property("reason"))
     
     
 

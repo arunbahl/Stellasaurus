@@ -6,8 +6,8 @@ resulting Verified Pair Registry.
 
 from stellasaurus.background.equivalence.engine import (
     EquivalenceEngine,
-    all_dimensions_match,
     contract_from_market,
+    verdict_to_criteria,
 )
 
-__all__ = ["EquivalenceEngine", "all_dimensions_match", "contract_from_market"]
+__all__ = ["EquivalenceEngine", "contract_from_market", "verdict_to_criteria"]

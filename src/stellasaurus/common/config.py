@@ -97,6 +97,12 @@ class Settings(BaseSettings):
     # FIREWORKS_LLM_ENDPOINT + FIREWORKS_API_KEY_BAML from the environment, so no
     # LLM client settings live here.
 
+    # --- pairing loop (Phase 2) ---
+    pairing_enabled: bool = True  # runs only if the LLM is configured
+    pairing_refresh_seconds: int = 600
+    pairing_max_llm_calls: int = 10  # per cycle — bounds LLM spend
+    pairing_min_score: float = 0.35  # candidate token-overlap floor
+
     # --- safety gate ---
     live_trading_enabled: bool = False
 

@@ -19,12 +19,6 @@ type_map = {
     "types.Contract": types.Contract,
     "stream_types.Contract": stream_types.Contract,
 
-    "types.ContractCriteria": types.ContractCriteria,
-    "stream_types.ContractCriteria": stream_types.ContractCriteria,
-
-    "types.DimensionMatch": types.DimensionMatch,
-    "stream_types.DimensionMatch": stream_types.DimensionMatch,
-
     "types.EquivalenceVerdict": types.EquivalenceVerdict,
     "stream_types.EquivalenceVerdict": stream_types.EquivalenceVerdict,
 

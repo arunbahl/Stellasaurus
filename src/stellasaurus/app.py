@@ -17,6 +17,8 @@ import uvicorn
 from dotenv import load_dotenv
 
 from stellasaurus.background.catalog_sync import CatalogSync
+from stellasaurus.background.equivalence import EquivalenceEngine
+from stellasaurus.background.pairing import PairingLoop
 from stellasaurus.background.registry_loader import RegistryLoader
 from stellasaurus.background.scheduler import TaskSupervisor
 from stellasaurus.background.subscription_mgr import SubscriptionManager
@@ -127,6 +129,32 @@ async def run(settings: Settings | None = None) -> None:
         supervisor.run_periodic(
             "catalog_sync", settings.catalog_refresh_seconds, catalog.sync_once
         )
+
+        # Phase 2 pairing loop: candidates -> LLM verdicts -> registry (source=LLM).
+        engine = EquivalenceEngine()
+        if settings.pairing_enabled and engine.configured:
+            pairing = PairingLoop(
+                clients=clients,
+                engine=engine,
+                registry_repo=registry_repo,
+                audit_repo=audit_repo,
+                publish=loader.publish,
+                max_llm_calls=settings.pairing_max_llm_calls,
+                min_score=settings.pairing_min_score,
+            )
+
+            async def pairing_cycle() -> None:
+                await pairing.run_once()
+
+            supervisor.run_periodic(
+                "pairing", settings.pairing_refresh_seconds, pairing_cycle
+            )
+        else:
+            _log.info(
+                "pairing_disabled",
+                enabled=settings.pairing_enabled,
+                llm_configured=engine.configured,
+            )
 
         hosts = resolve_bind_hosts(settings.dashboard_expose, settings.dashboard_host)
         servers = []
