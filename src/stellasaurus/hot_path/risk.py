@@ -52,25 +52,45 @@ class RiskManager:
         self._decisions: deque[RiskDecision] = deque(maxlen=decisions_maxlen)
         self._undrained: deque[RiskDecision] = deque(maxlen=decisions_maxlen)
         self._lock = threading.Lock()
+        # In-flight reservations: intents approved but not yet recorded as
+        # positions. Execution is async (evaluator -> queue -> worker), so
+        # without this the evaluator floods the queue before the first position
+        # lands and every gate sees an empty store — validated live: 13 intents
+        # cleared a max_open_pairs=1 gate. reserve() is synchronous within the
+        # single-tick evaluator->approve->submit chain, closing the race.
+        self._reserved: dict[str, Micros] = {}
 
     def approve(self, intent: TradeIntent) -> bool:
         committed = intent.qty * (intent.vwap_yes_micros + intent.vwap_no_micros)
-        rejected_by = self._check(intent, committed)
-        decision = RiskDecision(
-            pair_id=intent.pair_id,
-            orientation=intent.orientation,
-            qty=intent.qty,
-            committed_micros=committed,
-            approved=rejected_by is None,
-            rejected_by=rejected_by,
-            ts_wall_ms=self._clock.wall_ms(),
-        )
         with self._lock:
+            rejected_by = self._check(intent, committed)
+            if rejected_by is None:
+                # Reserve synchronously — before the tick yields to the executor
+                # worker — so the next evaluator fire counts this in-flight leg.
+                self._reserved[intent.pair_id] = committed
+            decision = RiskDecision(
+                pair_id=intent.pair_id,
+                orientation=intent.orientation,
+                qty=intent.qty,
+                committed_micros=committed,
+                approved=rejected_by is None,
+                rejected_by=rejected_by,
+                ts_wall_ms=self._clock.wall_ms(),
+            )
             self._decisions.append(decision)
             self._undrained.append(decision)
         return rejected_by is None
 
+    def release(self, pair_id: str) -> None:
+        """Drop a reservation once the executor has recorded the outcome. Called
+        for EVERY terminal outcome (hedged/unwound/failed/hanging) so a slot is
+        never leaked. Idempotent."""
+        with self._lock:
+            self._reserved.pop(pair_id, None)
+
     def _check(self, intent: TradeIntent, committed: Micros) -> str | None:
+        # NOTE: caller holds self._lock (reservations read here must be atomic
+        # with the reserve that follows a pass).
         limits = self._state.limits()
         if limits.halted:
             return "halted"
@@ -79,16 +99,20 @@ class RiskManager:
             return "pair_not_verified"
         if not self._state.is_fresh(intent.pair_id):
             return "stale_book"
-        if self._positions.has_open(intent.pair_id):
+        # a recorded position OR an in-flight reservation counts as "open"
+        if self._positions.has_open(intent.pair_id) or intent.pair_id in self._reserved:
             return "pair_already_open"
         if committed > limits.max_bet_value_micros:
             return "max_bet_value"
         totals = self._positions.totals()
-        if totals.open_pairs + 1 > limits.max_open_pairs:
+        reserved_pairs = len(self._reserved)
+        reserved_committed = sum(self._reserved.values())
+        if totals.open_pairs + reserved_pairs + 1 > limits.max_open_pairs:
             return "max_open_pairs"
-        if totals.committed_micros + committed > limits.max_committed_capital_micros:
+        effective = totals.committed_micros + reserved_committed + committed
+        if effective > limits.max_committed_capital_micros:
             return "max_committed_capital"
-        if totals.committed_micros + committed > limits.max_aggregate_exposure_micros:
+        if effective > limits.max_aggregate_exposure_micros:
             return "max_aggregate_exposure"
         return None
 

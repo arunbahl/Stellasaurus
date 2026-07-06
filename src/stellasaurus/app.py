@@ -153,6 +153,7 @@ async def run(settings: Settings | None = None) -> None:
         executor = PaperExecutionEngine(
             state=store, positions=positions_store, fee_params=fee_params,
             slippage_tolerance_bips=settings.slippage_tolerance_bips,
+            on_release=risk.release,
         )
         halt = HaltController(
             store=store, positions=positions_store, audit_repo=audit_repo,
@@ -202,6 +203,7 @@ async def run(settings: Settings | None = None) -> None:
                         True, actor="live_execution", reason=reason
                     ),
                     flattener=flattener,
+                    on_release=risk.release,
                 )
                 executor = live_engine  # type: ignore[assignment]
                 live_flattener = flattener  # supervised after the supervisor exists

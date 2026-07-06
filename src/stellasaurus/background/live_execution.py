@@ -50,6 +50,7 @@ class LiveExecutionEngine:
         requote: object | None = None,  # async (intent) -> (vy, vn) micros or None
         halt: object | None = None,  # (reason: str) -> None, called on a hanging leg
         flattener: object | None = None,  # .enqueue(NakedLeg) auto-flatten sink
+        on_release: object | None = None,  # (pair_id) -> None, frees the risk reservation
     ) -> None:
         self._state = state
         self._positions = positions
@@ -59,6 +60,7 @@ class LiveExecutionEngine:
         self._requote = requote
         self._halt = halt
         self._flattener = flattener
+        self._on_release = on_release
         self._queue: asyncio.Queue[TradeIntent] = asyncio.Queue(maxsize=64)
         self._counter = 0
 
@@ -69,6 +71,10 @@ class LiveExecutionEngine:
             self._queue.put_nowait(intent)
         except asyncio.QueueFull:
             _log.warning("live_queue_full_intent_dropped", pair_id=intent.pair_id)
+            # Dropped before the worker runs -> release here or the reservation
+            # leaks (the run() finally never fires for this intent).
+            if self._on_release is not None:
+                self._on_release(intent.pair_id)  # type: ignore[operator]
 
     # --- background worker ---
 
@@ -79,6 +85,11 @@ class LiveExecutionEngine:
                 await self._execute(intent)
             except Exception as exc:  # noqa: BLE001 - never kill the worker
                 _log.error("live_execution_error", pair_id=intent.pair_id, error=str(exc))
+            finally:
+                # Free the risk reservation on EVERY terminal outcome (including
+                # exceptions/requote-aborts) so a slot is never leaked.
+                if self._on_release is not None:
+                    self._on_release(intent.pair_id)  # type: ignore[operator]
 
     def _limit(self, price: Micros) -> Micros:
         # Pad must survive cent-tick flooring (validated live: a sub-tick pad

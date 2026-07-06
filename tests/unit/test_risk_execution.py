@@ -303,3 +303,63 @@ async def test_live_engine_hanging_leg_halts_and_enqueues(tmp_path):
     assert enq[0].venue is Venue.KALSHI  # the leg that actually filled
     recorded = positions.open_positions()
     assert len(recorded) == 1 and recorded[0].hedge_status is HedgeStatus.HANGING
+
+
+def _risk_fixture(tmp_path, max_open_pairs=1, max_committed=10**12):
+    from stellasaurus.common.types import OutcomePolarity, PairSource, PairStatus
+    from stellasaurus.hot_path.positions import PositionsStore
+    from stellasaurus.hot_path.risk import RiskManager
+    from stellasaurus.hot_path.snapshot import (
+        LimitsSnapshot,
+        PairRegistryEntry,
+        RegistrySnapshot,
+    )
+    from stellasaurus.hot_path.state import HotStateStore
+    e1 = PairRegistryEntry("p1", "P1", "K1", "s1", OutcomePolarity.DIRECT,
+                           PairStatus.VERIFIED, 10**13, None, 0, "fp", PairSource.STRUCTURED)
+    e2 = PairRegistryEntry("p2", "P2", "K2", "s2", OutcomePolarity.DIRECT,
+                           PairStatus.VERIFIED, 10**13, None, 0, "fp", PairSource.STRUCTURED)
+    store = HotStateStore(
+        registry=RegistrySnapshot.build(1, [e1, e2], now_ms=0),
+        limits=LimitsSnapshot(1, False, 0, 0.0, 1, 10**9, 10**12, max_committed,
+                              max_open_pairs, max_committed, 0.5),
+        book_staleness_ms=10**9,
+    )
+    # make both pairs "fresh" by publishing books
+    from stellasaurus.common.types import Venue
+    from stellasaurus.hot_path.book import NativeBook, PriceLevel
+    from stellasaurus.hot_path.normalize import normalize
+    for pid, k, s in (("p1", "K1", "s1"), ("p2", "K2", "s2")):
+        for v in (Venue.KALSHI, Venue.POLYMARKET):
+            nb = NativeBook(v, k if v is Venue.KALSHI else s,
+                            (PriceLevel(500_000, 100),), (PriceLevel(510_000, 100),),
+                            None, None, 1, 0, 0)
+            store.publish_book(normalize(nb, polarity=OutcomePolarity.DIRECT, pair_id=pid))
+    return RiskManager(state=store, positions=PositionsStore()), store
+
+
+def test_reservations_stop_inflight_flood_on_same_pair(tmp_path):
+    """The live bug: async execution means positions lag; without reservations
+    N intents on ONE pair all clear the gate before any records."""
+    from stellasaurus.common.types import Venue
+    from stellasaurus.hot_path.seams import TradeIntent
+    risk, _ = _risk_fixture(tmp_path, max_open_pairs=1)
+    intent = TradeIntent("p1", "A", 1, Venue.KALSHI, Venue.POLYMARKET,
+                         480_000, 500_000, 20_000, 0)
+    assert risk.approve(intent) is True        # first reserves the slot
+    assert risk.approve(intent) is False       # same pair now pair_already_open
+    assert risk.approve(intent) is False       # still blocked (no positions yet)
+    risk.release("p1")
+    assert risk.approve(intent) is True         # slot freed -> allowed again
+
+
+def test_reservations_enforce_max_open_pairs_across_pairs(tmp_path):
+    from stellasaurus.common.types import Venue
+    from stellasaurus.hot_path.seams import TradeIntent
+    risk, _ = _risk_fixture(tmp_path, max_open_pairs=1)
+    i1 = TradeIntent("p1", "A", 1, Venue.KALSHI, Venue.POLYMARKET, 480_000, 500_000, 20_000, 0)
+    i2 = TradeIntent("p2", "A", 1, Venue.KALSHI, Venue.POLYMARKET, 480_000, 500_000, 20_000, 0)
+    assert risk.approve(i1) is True
+    assert risk.approve(i2) is False   # different pair, but max_open_pairs=1 incl. reservation
+    risk.release("p1")
+    assert risk.approve(i2) is True

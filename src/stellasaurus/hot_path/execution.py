@@ -74,6 +74,7 @@ class PaperExecutionEngine:
         fee_params: FeeParams,
         slippage_tolerance_bips: int,
         clock: Clock | None = None,
+        on_release: object | None = None,  # (pair_id) -> None, frees risk reservation
     ) -> None:
         self._state = state
         self._positions = positions
@@ -81,6 +82,7 @@ class PaperExecutionEngine:
         self._slip_bips = slippage_tolerance_bips
         self._clock = clock or SystemClock()
         self._counter = 0
+        self._on_release = on_release
 
     def publish_fee_params(self, params: FeeParams) -> None:
         """Atomic rebind — background fee sync swaps params without locking."""
@@ -92,6 +94,16 @@ class PaperExecutionEngine:
         return intent_price + pad
 
     def submit(self, intent: TradeIntent) -> None:
+        try:
+            self._submit(intent)
+        finally:
+            # Paper records synchronously in this same tick, so the reservation
+            # is added (approve) and freed (here) within one tick — a no-op that
+            # keeps the reservation contract uniform across executors.
+            if self._on_release is not None:
+                self._on_release(intent.pair_id)  # type: ignore[operator]
+
+    def _submit(self, intent: TradeIntent) -> None:
         params = self._fee_params
         now_ms = self._clock.wall_ms()
         self._counter += 1
