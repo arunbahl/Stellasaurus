@@ -81,8 +81,13 @@ class SubscriptionManager:
         self._maps[Venue.POLYMARKET] = {}
         for pair_id in snapshot.verified:
             entry = snapshot.by_id[pair_id]
+            # outcome_polarity describes POLYMARKET's YES relative to KALSHI's
+            # (the canonical reference). So the Kalshi leg is ALWAYS DIRECT; only
+            # the Poly leg is reflected for an INVERTED pair. Applying the pair
+            # polarity to the Kalshi leg too wrongly reflected the reference book
+            # and manufactured phantom edges on every INVERTED (sports) pair.
             self._maps[Venue.KALSHI].setdefault(entry.kalshi_ticker, []).append(
-                (pair_id, entry.outcome_polarity)
+                (pair_id, OutcomePolarity.DIRECT)
             )
             self._maps[Venue.POLYMARKET].setdefault(entry.poly_market_slug, []).append(
                 (pair_id, entry.outcome_polarity)

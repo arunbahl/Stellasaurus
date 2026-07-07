@@ -187,3 +187,23 @@ async def test_polarity_change_renormalizes_retained_native_book():
     sm.refresh_routes()  # no new frame — must re-normalize from the retained native
     after = store.book("p1", Venue.POLYMARKET)
     assert after is not None and after.yes_asks != before.yes_asks
+
+
+def test_kalshi_leg_always_direct_even_for_inverted_pair():
+    """outcome_polarity is Poly-relative-to-Kalshi; the Kalshi (reference) book
+    must NOT be reflected for an INVERTED pair (that phantom'd every sports edge)."""
+    from stellasaurus.hot_path.book import NativeBook, PriceLevel
+    e = PairRegistryEntry("p", "prop", "KTICK", "pslug", OutcomePolarity.INVERTED,
+                          PairStatus.VERIFIED, FUTURE, None, 0, "fp", PairSource.LLM)
+    store = _store_with([e])
+    sm = _sub_mgr(store)
+    sm._build_maps()
+    # Kalshi native: two-sided book (bids 0.40 / asks 0.42)
+    kn = NativeBook(Venue.KALSHI, "KTICK",
+                    (PriceLevel(400_000, 10),), (PriceLevel(420_000, 10),),
+                    None, None, 1, 0, 0)
+    sm._on_book(Venue.KALSHI)(kn)
+    book = store.book("p", Venue.KALSHI)
+    # DIRECT normalization keeps the native YES ask as canonical YES ask (0.42),
+    # NOT reflected to ~0.60 as an INVERTED mapping would.
+    assert book is not None and book.yes_asks and book.yes_asks[0].price == 420_000
