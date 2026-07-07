@@ -4,7 +4,7 @@ from stellasaurus.background.pairing import PairingLoop, generate_candidates
 from stellasaurus.background.registry_loader import RegistryLoader
 from stellasaurus.baml_client.types import EquivalenceVerdict
 from stellasaurus.baml_client.types import OutcomePolarity as BamlPolarity
-from stellasaurus.common.types import PairSource, PairStatus, Venue
+from stellasaurus.common.types import OutcomePolarity, PairSource, PairStatus, Venue
 from stellasaurus.hot_path.snapshot import LimitsSnapshot, RegistrySnapshot
 from stellasaurus.hot_path.state import HotStateStore
 from stellasaurus.storage.audit_repo import AuditRepo
@@ -187,3 +187,47 @@ async def test_structured_only_pass_spends_no_llm(tmp_path):
     evaluated = await loop.run_once(llm_budget=0)
     assert evaluated == 0
     assert engine.calls == 0  # nothing spent on the LLM
+
+
+async def test_versus_polarity_override_and_ambiguous_reject(tmp_path):
+    """Item 2b: LLM judges equivalence; the deterministic resolver OVERRIDES its
+    polarity for versus markets, and an unresolvable polarity is REJECTED
+    without an LLM call."""
+    import json as _json
+
+    from stellasaurus.storage.markets_repo import MarketRow
+    from stellasaurus.venues.base import market_fingerprint
+    registry, markets, audit_repo, loader, store = _fixture(tmp_path)
+
+    def put(venue, nid, title, raw):
+        m = RawMarket(venue, nid, title, title, "src", T0, "open", raw)
+        markets.upsert(MarketRow(
+            venue=venue, native_id=nid, title=title, rules_text=title,
+            settlement_source="src", resolves_at_ms=T0, status="open",
+            terms_fingerprint=market_fingerprint(m), raw_json=_json.dumps(raw)))
+
+    # (1) versus pair the resolver reads as INVERTED (Kalshi-YES = outcomes[1])
+    put(Venue.KALSHI, "K-UFC", "Conor McGregor vs Max Holloway winner",
+        {"yes_sub_title": "Conor McGregor", "rules_primary": "If Conor McGregor wins"})
+    put(Venue.POLYMARKET, "P-UFC", "Conor McGregor vs Max Holloway winner",
+        {"outcomes": _json.dumps(["Max Holloway", "Conor McGregor"])})
+    # (2) versus pair whose YES entity matches NEITHER outcome -> ambiguous
+    put(Venue.KALSHI, "K-WNBA", "WNBA Golden State vs Toronto winner today",
+        {"yes_sub_title": "Golden State", "rules_primary": "If Golden State wins"})
+    put(Venue.POLYMARKET, "P-WNBA", "WNBA Golden State vs Toronto winner today",
+        {"outcomes": _json.dumps(["Valkyries", "Toronto"])})
+
+    engine = FakeEngine(equivalent_ids={"K-UFC", "K-WNBA"})  # LLM: both equivalent
+    loop = PairingLoop(
+        markets_repo=markets, engine=engine, registry_repo=registry,
+        audit_repo=audit_repo, publish=loader.publish, max_llm_calls=10,
+    )
+    await loop.run_once()
+    entries = {e.kalshi_ticker: e for e in registry.all_entries()}
+    # UFC: LLM equivalent + resolver override -> VERIFIED with INVERTED polarity
+    # (NOT the DIRECT the FakeEngine returned)
+    assert entries["K-UFC"].status is PairStatus.VERIFIED
+    assert entries["K-UFC"].outcome_polarity is OutcomePolarity.INVERTED
+    # WNBA: ambiguous polarity -> rejected deterministically, LLM NOT consulted
+    assert entries["K-WNBA"].status is PairStatus.NOT_EQUIVALENT
+    assert engine.calls == 1  # only the UFC pair reached the LLM

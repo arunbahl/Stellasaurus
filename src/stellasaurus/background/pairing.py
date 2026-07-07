@@ -24,7 +24,12 @@ import re
 from dataclasses import dataclass
 
 from stellasaurus.background.equivalence import EquivalenceEngine, contract_from_market
-from stellasaurus.background.matchers import MatchedCandidate, run_matchers
+from stellasaurus.background.matchers import (
+    MatchedCandidate,
+    _poly_versus_outcomes,
+    resolve_versus_polarity,
+    run_matchers,
+)
 from stellasaurus.baml_client.types import EquivalenceVerdict
 from stellasaurus.common.clock import wall_ms
 from stellasaurus.common.ids import normalize_text, slugify, terms_fingerprint
@@ -237,7 +242,34 @@ class PairingLoop:
                     MatchedCandidate(g.kalshi, g.poly, g.score, "token")
                 )
 
-        # 3) LLM evaluation for the remainder, budget-capped.
+        # 3) Versus polarity resolution (deterministic) applied to ALL LLM
+        #    candidates regardless of how they were generated: a two-outcome
+        #    "versus" market whose polarity we CAN'T resolve is REJECTED here (no
+        #    LLM, never guess which side YES pays on); the rest keep the resolver
+        #    verdict to override the LLM's polarity below.
+        versus_hint: dict[tuple[str, str], OutcomePolarity] = {}
+        remaining: list[MatchedCandidate] = []
+        for c in llm_queue:
+            legs = (c.kalshi.native_id, c.poly.native_id)
+            if _poly_versus_outcomes(c.poly) is None:
+                remaining.append(c)
+                continue
+            hint = resolve_versus_polarity(c.kalshi, c.poly)
+            if hint is None:
+                if not self._registry.find_by_legs(*legs):
+                    self._write_entry(
+                        kalshi=c.kalshi, poly=c.poly, status=PairStatus.NOT_EQUIVALENT,
+                        polarity=OutcomePolarity.DIRECT,
+                        criteria={"reason": "versus_polarity_ambiguous"},
+                        source=PairSource.STRUCTURED, score=c.score,
+                    )
+                    wrote += 1
+            else:
+                versus_hint[legs] = hint
+                remaining.append(c)
+        llm_queue = remaining
+
+        # 4) LLM evaluation for the remainder, budget-capped.
         budget = self._max_llm_calls if llm_budget is None else llm_budget
         evaluated = 0
         if budget == 0:
@@ -280,6 +312,13 @@ class PairingLoop:
                 c, verdict = res
                 evaluated += 1
                 status, polarity, criteria = EquivalenceEngine.disposition(verdict)
+                # For versus markets, TRUST the LLM on equivalence (same event +
+                # proposition) but OVERRIDE its polarity with the deterministic
+                # resolver — the LLM reliably mislabels which token is YES.
+                hint = versus_hint.get((c.kalshi.native_id, c.poly.native_id))
+                if hint is not None:
+                    polarity = hint
+                    criteria = {**criteria, "polarity_source": "versus_resolver"}
                 self._write_entry(
                     kalshi=c.kalshi, poly=c.poly, status=status, polarity=polarity,
                     criteria=criteria, source=PairSource.LLM, score=c.score,

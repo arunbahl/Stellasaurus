@@ -117,3 +117,73 @@ async def test_feeds_stop_when_registry_empties():
     finally:
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
+
+
+# --- Item 1a: multi-pair routing + re-normalize on polarity change ---
+
+def _sub_mgr(store):
+    import httpx
+
+    from stellasaurus.background.subscription_mgr import SubscriptionManager
+    from stellasaurus.common.config import Settings
+    from stellasaurus.hot_path.ingest import BookStore
+    return SubscriptionManager(
+        settings=Settings(), http=httpx.AsyncClient(),
+        store=store, book_store=BookStore(store),
+    )
+
+
+def _native(native_id: str):
+    from stellasaurus.hot_path.book import NativeBook, PriceLevel
+    # Poly-style single YES book: yes bids/asks present, no_* None (derived)
+    return NativeBook(
+        Venue.POLYMARKET, native_id,
+        (PriceLevel(600_000, 100),), (PriceLevel(650_000, 100),),
+        None, None, 1, 0, 0,
+    )
+
+
+def _store_with(entries):
+    return HotStateStore(
+        registry=RegistrySnapshot.build(1, entries, now_ms=0),
+        limits=LimitsSnapshot(1, False, 0, 0.0, 1, 10**8, 10**9, 10**12, 20,
+                              10**12, 0.5),
+        book_staleness_ms=10**9,
+    )
+
+
+def test_one_native_market_routes_to_both_pairs_opposite_polarity():
+    """UFC-style: two pairs share one Poly market with OPPOSITE polarity; a
+    single native frame must normalize once per pair, each its own way."""
+    e_direct = PairRegistryEntry("pd", "p", "KHOL", "polyslug", OutcomePolarity.DIRECT,
+                                 PairStatus.VERIFIED, FUTURE, None, 0, "fp", PairSource.STRUCTURED)
+    e_inv = PairRegistryEntry("pi", "p", "KMCG", "polyslug", OutcomePolarity.INVERTED,
+                              PairStatus.VERIFIED, FUTURE, None, 0, "fp", PairSource.STRUCTURED)
+    store = _store_with([e_direct, e_inv])
+    sm = _sub_mgr(store)
+    sm._build_maps()
+    sm._on_book(Venue.POLYMARKET)(_native("polyslug"))
+    bd = store.book("pd", Venue.POLYMARKET)
+    bi = store.book("pi", Venue.POLYMARKET)
+    assert bd is not None and bi is not None  # BOTH pairs got a book
+    # DIRECT vs INVERTED must produce different canonical-YES books
+    assert bd.yes_asks != bi.yes_asks
+
+
+async def test_polarity_change_renormalizes_retained_native_book():
+    """A DIRECT->INVERTED correction must re-normalize the CACHED book with no
+    new frame (the stale-normalization bug)."""
+    e = PairRegistryEntry("p1", "p", "K1", "s1", OutcomePolarity.DIRECT,
+                          PairStatus.VERIFIED, FUTURE, None, 0, "fp", PairSource.STRUCTURED)
+    store = _store_with([e])
+    sm = _sub_mgr(store)
+    sm._build_maps()
+    sm._on_book(Venue.POLYMARKET)(_native("s1"))
+    before = store.book("p1", Venue.POLYMARKET)
+    # flip the pair to INVERTED and publish the new snapshot
+    e2 = PairRegistryEntry("p1", "p", "K1", "s1", OutcomePolarity.INVERTED,
+                           PairStatus.VERIFIED, FUTURE, None, 0, "fp", PairSource.STRUCTURED)
+    store.publish_registry(RegistrySnapshot.build(2, [e2], now_ms=0))
+    sm.refresh_routes()  # no new frame — must re-normalize from the retained native
+    after = store.book("p1", Venue.POLYMARKET)
+    assert after is not None and after.yes_asks != before.yes_asks

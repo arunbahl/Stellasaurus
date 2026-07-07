@@ -53,8 +53,18 @@ class SubscriptionManager:
         self._http = http
         self._store = store
         self._book_store = book_store
-        # native_id -> (pair_id, polarity), per venue
-        self._maps: dict[Venue, dict[str, tuple[str, OutcomePolarity]]] = {
+        # native_id -> LIST of (pair_id, polarity): one native market can back
+        # several pairs (e.g. both sides of a game reference the same Polymarket
+        # market with OPPOSITE polarity), so each native frame normalizes once
+        # per referencing pair.
+        self._maps: dict[Venue, dict[str, list[tuple[str, OutcomePolarity]]]] = {
+            Venue.KALSHI: {},
+            Venue.POLYMARKET: {},
+        }
+        # Last native book per (venue, native_id) — retained so a registry
+        # polarity change can re-normalize immediately instead of waiting for
+        # the next frame (quiet markets would otherwise stay mis-normalized).
+        self._native: dict[Venue, dict[str, NativeBook]] = {
             Venue.KALSHI: {},
             Venue.POLYMARKET: {},
         }
@@ -63,20 +73,40 @@ class SubscriptionManager:
     def feed_stats(self) -> list[FeedStats]:
         return [f.stats for f in self._feeds]
 
-    def plan(self) -> list[PlannedFeed]:
+    def _build_maps(self) -> tuple[list[str], list[str]]:
+        """(Re)build native_id -> [(pair_id, polarity)] routes from the current
+        registry. Returns the distinct native ids per venue."""
         snapshot = self._store.registry()
-        # Rebuilt from scratch each plan so re-plans don't accumulate stale routes.
         self._maps[Venue.KALSHI] = {}
         self._maps[Venue.POLYMARKET] = {}
-        kalshi_ids: list[str] = []
-        poly_ids: list[str] = []
         for pair_id in snapshot.verified:
             entry = snapshot.by_id[pair_id]
-            self._maps[Venue.KALSHI][entry.kalshi_ticker] = (pair_id, entry.outcome_polarity)
-            self._maps[Venue.POLYMARKET][entry.poly_market_slug] = (pair_id, entry.outcome_polarity)
-            kalshi_ids.append(entry.kalshi_ticker)
-            poly_ids.append(entry.poly_market_slug)
+            self._maps[Venue.KALSHI].setdefault(entry.kalshi_ticker, []).append(
+                (pair_id, entry.outcome_polarity)
+            )
+            self._maps[Venue.POLYMARKET].setdefault(entry.poly_market_slug, []).append(
+                (pair_id, entry.outcome_polarity)
+            )
+        return list(self._maps[Venue.KALSHI]), list(self._maps[Venue.POLYMARKET])
 
+    def _normalize_native(self, venue: Venue, native: NativeBook) -> None:
+        for pair_id, polarity in self._maps[venue].get(native.native_id, ()):
+            self._book_store.update(
+                normalize(native, polarity=polarity, pair_id=pair_id)
+            )
+
+    def refresh_routes(self) -> None:
+        """Cheap re-route on a registry change that did NOT change the market set
+        (e.g. a polarity correction): rebuild the maps and RE-NORMALIZE every
+        retained native book so the fix lands immediately, without tearing down
+        the WS feeds."""
+        self._build_maps()
+        for venue, books in self._native.items():
+            for native in books.values():
+                self._normalize_native(venue, native)
+
+    def plan(self) -> list[PlannedFeed]:
+        kalshi_ids, poly_ids = self._build_maps()
         planned: list[PlannedFeed] = []
         planned += self._plan_venue(Venue.KALSHI, kalshi_ids)
         planned += self._plan_venue(Venue.POLYMARKET, poly_ids)
@@ -90,15 +120,9 @@ class SubscriptionManager:
         return planned
 
     def _on_book(self, venue: Venue) -> Callable[[NativeBook], None]:
-        venue_map = self._maps[venue]
-
         def handler(native: NativeBook) -> None:
-            mapping = venue_map.get(native.native_id)
-            if mapping is None:
-                return
-            pair_id, polarity = mapping
-            book = normalize(native, polarity=polarity, pair_id=pair_id)
-            self._book_store.update(book)
+            self._native[venue][native.native_id] = native  # retain for re-route
+            self._normalize_native(venue, native)
 
         return handler
 

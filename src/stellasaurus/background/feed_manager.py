@@ -36,6 +36,9 @@ class FeedManager:
         self._interval = check_interval_s
         self._tasks: list[asyncio.Task[None]] = []
         self._current: frozenset[tuple[str, str]] = frozenset()
+        # Polarity-inclusive route signature: changes even when the market SET is
+        # unchanged (a pair flipping DIRECT<->INVERTED), so a correction re-routes.
+        self._route_sig: frozenset[tuple[str, str, str]] = frozenset()
 
     def _needed(self) -> frozenset[tuple[str, str]]:
         snap = self._store.registry()
@@ -44,14 +47,30 @@ class FeedManager:
             for pid in snap.verified
         )
 
+    def _route_signature(self) -> frozenset[tuple[str, str, str]]:
+        snap = self._store.registry()
+        return frozenset(
+            (snap.by_id[pid].kalshi_ticker, snap.by_id[pid].poly_market_slug,
+             snap.by_id[pid].outcome_polarity.value)
+            for pid in snap.verified
+        )
+
     async def run(self) -> None:
-        """Supervised forever-task: re-plan feeds whenever the needed set changes.
-        Owned feed tasks are torn down if this task itself is cancelled."""
+        """Supervised forever-task: re-plan feeds when the needed SET changes;
+        cheaply re-route + re-normalize when only polarity changes. Owned feed
+        tasks are torn down if this task itself is cancelled."""
         try:
             while True:
                 needed = self._needed()
                 if needed != self._current:
-                    await self._replan(needed)
+                    await self._replan(needed)  # rebuilds maps via plan()
+                    self._route_sig = self._route_signature()
+                else:
+                    sig = self._route_signature()
+                    if sig != self._route_sig:
+                        self._sub_mgr.refresh_routes()
+                        self._route_sig = sig
+                        _log.info("routes_refreshed", pairs=len(needed))
                 await asyncio.sleep(self._interval)
         finally:
             await self._stop_feeds()

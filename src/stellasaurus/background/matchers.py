@@ -306,16 +306,6 @@ class EntityMatcher:
                     if best is None or score > best.score:
                         best = MatchedCandidate(k, p, score, self.strategy)
             if best is not None:
-                # For a two-outcome "versus" market, resolve polarity
-                # deterministically and VERIFY it here — bypassing the LLM, which
-                # cannot reliably tell which team Poly's YES pays on. Ambiguous
-                # ones fall through to the LLM as before (preverdict stays None).
-                pol = resolve_versus_polarity(best.kalshi, best.poly)
-                if pol is not None:
-                    best = MatchedCandidate(
-                        best.kalshi, best.poly, best.score, "versus",
-                        preverdict=PairStatus.VERIFIED, polarity=pol,
-                    )
                 out.append(best)
         return out
 
