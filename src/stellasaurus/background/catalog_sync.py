@@ -14,6 +14,7 @@ Per cycle:
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import Callable
 
 from stellasaurus.common.logging import audit, get_logger
@@ -101,6 +102,10 @@ class CatalogSync:
                 rules_text=m.rules_text, settlement_source=m.settlement_source,
                 resolves_at_ms=m.resolves_at_ms, status=m.status,
                 terms_fingerprint=market_fingerprint(m),
+                # Persist the venue's raw fields so downstream matchers can read
+                # structured data (e.g. Polymarket `outcomes`, Kalshi
+                # `yes_sub_title`) needed for deterministic versus-polarity.
+                raw_json=json.dumps(m.raw, default=str),
             )
             for m in markets
         ]
