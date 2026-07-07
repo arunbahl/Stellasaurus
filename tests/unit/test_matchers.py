@@ -109,3 +109,56 @@ def test_run_matchers_prefers_deterministic():
     p = _p_temp("tc-temp-miahigh-2026-07-06-gte93lt94f", P_DESC.format("between 93F and 94F"))
     out = run_matchers([k], [p])
     assert len(out) == 1 and out[0].preverdict is PairStatus.VERIFIED
+
+
+def _versus_market(venue, native_id, title, *, rules=None, yes_sub=None, outcomes=None):
+    from stellasaurus.venues.base import RawMarket
+    raw = {}
+    if yes_sub:
+        raw["yes_sub_title"] = yes_sub
+    if rules:
+        raw["rules_primary"] = rules
+    if outcomes is not None:
+        raw["outcomes"] = outcomes  # JSON string, like the venue
+
+    return RawMarket(venue, native_id, title, rules, None, 1_783_497_600_000, "open", raw)
+
+
+def test_versus_polarity_inverted_when_poly_yes_is_other_side():
+    """The live bug: Poly book = outcomes[0]; if Kalshi-YES is the OTHER team the
+    pair is INVERTED, not DIRECT (which manufactured phantom 'edges')."""
+    import json
+
+    from stellasaurus.background.matchers import resolve_versus_polarity
+    from stellasaurus.common.types import OutcomePolarity, Venue
+    k = _versus_market(Venue.KALSHI, "KXUFC-MCG", "McGregor vs Holloway",
+                       rules="If Conor McGregor wins the fight", yes_sub="Conor McGregor")
+    p = _versus_market(Venue.POLYMARKET, "ufc-slug", "Holloway vs McGregor",
+                       outcomes=json.dumps(["Max Holloway", "Conor McGregor"]))
+    assert resolve_versus_polarity(k, p) is OutcomePolarity.INVERTED
+
+
+def test_versus_polarity_direct_when_poly_yes_matches_kalshi_yes():
+    import json
+
+    from stellasaurus.background.matchers import resolve_versus_polarity
+    from stellasaurus.common.types import OutcomePolarity, Venue
+    k = _versus_market(Venue.KALSHI, "K", "A vs B", yes_sub="CGN Esports")
+    p = _versus_market(Venue.POLYMARKET, "p",  "B vs A",
+                       outcomes=json.dumps(["CGN Esports", "Beşiktaş Esports"]))
+    assert resolve_versus_polarity(k, p) is OutcomePolarity.DIRECT
+
+
+def test_versus_polarity_none_for_yesno_and_ambiguous():
+    import json
+
+    from stellasaurus.background.matchers import resolve_versus_polarity
+    from stellasaurus.common.types import Venue
+    k = _versus_market(Venue.KALSHI, "K", "t", yes_sub="Toronto")
+    # Yes/No market is not a versus market
+    yn = _versus_market(Venue.POLYMARKET, "p", "t", outcomes=json.dumps(["Yes", "No"]))
+    assert resolve_versus_polarity(k, yn) is None
+    # entity matches neither named outcome -> ambiguous -> None (don't guess)
+    amb = _versus_market(Venue.POLYMARKET, "p", "t",
+                         outcomes=json.dumps(["Valkyries", "Chicago"]))
+    assert resolve_versus_polarity(k, amb) is None

@@ -19,6 +19,7 @@ v1 matchers:
 from __future__ import annotations
 
 import calendar
+import json
 import re
 from dataclasses import dataclass, field
 from typing import Any
@@ -200,6 +201,71 @@ def _entities(m: RawMarket) -> tuple[frozenset[str], frozenset[str], frozenset[s
     return names, codes, nums
 
 
+# --- Deterministic polarity for two-outcome "versus" markets ---------------
+# CRITICAL (validated live 2026-07-06): Polymarket's book is the LONG side of
+# outcomes[0]; the LLM cannot reliably infer from titles which of two teams a
+# YES pays on, so it mislabeled EVERY sports pair DIRECT — inverting the hedge
+# into a 2x directional bet and manufacturing phantom "edges" of 24-38c. Resolve
+# polarity structurally instead: match the Kalshi-YES entity to exactly one of
+# Polymarket's two named outcomes.
+_WORD = re.compile(r"[a-z0-9]+")
+# Generic connective/role noise dropped before entity token matching (NOT a
+# category allowlist — just words that never discriminate two named sides).
+_VS_NOISE = frozenset({"esports", "the", "fc", "team", "ev", "of", "and", "united"})
+
+
+def _tokset(text: str) -> frozenset[str]:
+    return frozenset(t for t in _WORD.findall((text or "").lower()) if t not in _VS_NOISE)
+
+
+def _poly_versus_outcomes(m: RawMarket) -> tuple[str, str] | None:
+    """(outcome0, outcome1) if the Poly market has two NAMED outcomes; else None.
+    Poly returns ``outcomes`` as a JSON string, and Yes/No markets are not versus."""
+    raw = m.raw.get("outcomes")
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except json.JSONDecodeError:
+            return None
+    if not (isinstance(raw, list) and len(raw) == 2):
+        return None
+    a, b = str(raw[0]), str(raw[1])
+    if {a.lower(), b.lower()} <= {"yes", "no"}:
+        return None
+    return a, b
+
+
+def _kalshi_yes_tokens(m: RawMarket) -> frozenset[str]:
+    """Tokens naming the entity Kalshi's YES resolves to."""
+    ys = m.raw.get("yes_sub_title") or m.raw.get("subtitle")
+    if isinstance(ys, str) and ys.strip():
+        return _tokset(ys)
+    rp = m.raw.get("rules_primary")
+    rules = m.rules_text or (rp if isinstance(rp, str) else "")
+    match = re.search(r"[Ii]f (.+?) wins", rules)
+    return _tokset(match.group(1)) if match else frozenset()
+
+
+def resolve_versus_polarity(kalshi: RawMarket, poly: RawMarket) -> OutcomePolarity | None:
+    """DIRECT/INVERTED when the Kalshi-YES entity matches exactly ONE Poly
+    outcome; None when the market isn't a versus market or the match is
+    ambiguous (leave those unverified rather than guess)."""
+    outcomes = _poly_versus_outcomes(poly)
+    if outcomes is None:
+        return None
+    k_yes = _kalshi_yes_tokens(kalshi)
+    if not k_yes:
+        return None
+    o0, o1 = _tokset(outcomes[0]), _tokset(outcomes[1])
+    d0, d1 = o0 - o1, o1 - o0  # discriminating tokens only
+    m0, m1 = bool(k_yes & d0), bool(k_yes & d1)
+    if m0 and not m1:
+        return OutcomePolarity.DIRECT     # Poly-YES(outcomes[0]) == Kalshi-YES
+    if m1 and not m0:
+        return OutcomePolarity.INVERTED   # Poly-YES is the OTHER side
+    return None
+
+
 class EntityMatcher:
     """Shared proper-name entities + same day (±1) + agreeing title numbers."""
 
@@ -240,6 +306,16 @@ class EntityMatcher:
                     if best is None or score > best.score:
                         best = MatchedCandidate(k, p, score, self.strategy)
             if best is not None:
+                # For a two-outcome "versus" market, resolve polarity
+                # deterministically and VERIFY it here — bypassing the LLM, which
+                # cannot reliably tell which team Poly's YES pays on. Ambiguous
+                # ones fall through to the LLM as before (preverdict stays None).
+                pol = resolve_versus_polarity(best.kalshi, best.poly)
+                if pol is not None:
+                    best = MatchedCandidate(
+                        best.kalshi, best.poly, best.score, "versus",
+                        preverdict=PairStatus.VERIFIED, polarity=pol,
+                    )
                 out.append(best)
         return out
 
