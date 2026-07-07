@@ -259,7 +259,12 @@ class PairingLoop:
                                      poly=c.poly.native_id, error=str(exc))
                         return None
 
-            for res in await asyncio.gather(*(_eval(c) for c in pending)):
+            # Write each verdict AS IT COMPLETES (not after the whole gather), so
+            # a long cycle streams results and an interruption never discards
+            # finished evaluations — they're already durable and skipped next run.
+            tasks = [asyncio.create_task(_eval(c)) for c in pending]
+            for fut in asyncio.as_completed(tasks):
+                res = await fut
                 if res is None:
                     continue
                 c, verdict = res
