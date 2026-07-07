@@ -109,6 +109,55 @@ python -m stellasaurus.app
 Keep `theta_micros` positive so it fires only genuine edges. The kill switch,
 reservation caps, cooldown, and auto-flattener are all active in live mode.
 
+## Operating & recovery
+
+The app is one long-lived process. It logs structured events to stdout and keeps
+durable state in SQLite (`STELLA_DB_PATH`, default `data/stella.db`); the hot
+path is in-memory and rebuilt on start.
+
+```bash
+python -m stellasaurus.app          # foreground; Ctrl-C = graceful shutdown
+# background: run under your process manager and capture stdout to a log file.
+pkill -f stellasaurus.app           # stop a backgrounded instance
+```
+
+**Observe** (dashboard at `:8770`, or curl the JSON):
+
+| Endpoint | Shows |
+| --- | --- |
+| `GET /health` | per-feed connected/frames/last-frame, latency p50/p95, per-pair freshness |
+| `GET /positions` | totals (`halted`, `open_pairs`, `committed`, realized P&L) + open positions + recent risk decisions |
+| `GET /opportunities` | latest per-pair evaluations (net edge, the gate that blocked, would-fire) and paper fires |
+| `GET /pairs`, `/books`, `/catalog/stats` | verified registry, live canonical-YES books, catalog counts |
+
+**Control** (also the dashboard buttons):
+
+```bash
+curl -XPOST :8770/halt   -d '{"halted":true,"reason":"manual"}'   # kill switch
+curl -XPOST :8770/halt   -d '{"halted":false}'                    # resume
+curl -XPOST :8770/limits -d '{"theta_micros":30000,"max_open_pairs":2}'  # live-edit caps
+```
+
+**Failure modes** — what the system does, and what you do:
+
+| Symptom / log event | Automatic response | Operator action |
+| --- | --- | --- |
+| A feed disconnects | supervisor reconnects with backoff; books go stale → non-evaluable | none unless persistent; check `/health` |
+| All feeds stale past threshold | **auto-halt** | investigate connectivity, then resume |
+| Fee params diverge from venue | **auto-halt** (`fee_sync`) | verify fee model vs venue, resume |
+| One leg fills, other doesn't | forced unwind → `UNWOUND` (small loss); pair enters cooldown | none |
+| Unwind fails (`…HANGING_leg_HALTING`) | **halt** + auto-flattener owns the naked leg, retrying to flat (`flatten_success`) | none if it flattens; if `flatten_EXHAUSTED_still_naked`, flatten manually (below) then review before resuming |
+| Over-commit / duplicate fire | blocked by in-flight reservations + `max_open_pairs`/`max_committed_capital` | none |
+
+**Reconcile & manual flatten.** Both venues' own position endpoints are the source
+of truth — the app never assumes fills. If a naked leg persists (flattener budget
+exhausted, or the app was down), read the live positions
+(`GET /portfolio/positions` on Kalshi, `GET /v1/portfolio/positions` on Polymarket
+with the same signed auth the app uses) and close any nonzero net with a marketable
+reduce-only / opposite-side order. Do this **before** clearing halt. A restart
+rebuilds the in-memory state and reservations from an empty store, so always
+confirm both venues are flat (or intended-hedged) after any incident.
+
 ## Configuration
 
 Settings load from `config/default.toml`, overridable via `STELLA_*` environment
