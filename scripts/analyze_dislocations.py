@@ -81,7 +81,8 @@ def main() -> None:
     print(f"θ-crossing windows: {len(windows)}")
     print(f"  duration ms   p50={pct(durs,0.5)}  p90={pct(durs,0.9)}  "
           f"max={durs[-1]}  min={durs[0]}")
-    print(f"  peak edge     max=${max(peaks)/1e6:.3f}  median=${sorted(peaks)[len(peaks)//2]/1e6:.3f}")
+    med = sorted(peaks)[len(peaks) // 2] / 1e6
+    print(f"  peak edge     max=${max(peaks)/1e6:.3f}  median=${med:.3f}")
     instant = sum(1 for d in durs if d == 0)
     print(f"  instantaneous (single-sample, <one update apart): {instant}/{len(windows)}")
     print("\n  interpretation:")

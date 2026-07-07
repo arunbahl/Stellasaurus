@@ -19,6 +19,7 @@ LLM spend is bounded by ``max_llm_calls`` per cycle; already-evaluated leg pairs
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 from dataclasses import dataclass
 
@@ -47,10 +48,19 @@ _NUM = re.compile(r"\d+(?:\.\d+)?")
 
 
 def _row_to_raw(m: MarketRow) -> RawMarket:
+    # Load the stored venue fields back into .raw so structured matchers can read
+    # them (e.g. Polymarket `outcomes` / Kalshi `yes_sub_title` for versus
+    # polarity). Empty when the market predates raw_json persistence.
+    raw: dict[str, object] = {}
+    if m.raw_json:
+        try:
+            raw = json.loads(m.raw_json)
+        except json.JSONDecodeError:
+            raw = {}
     return RawMarket(
         venue=m.venue, native_id=m.native_id, title=m.title, rules_text=m.rules_text,
         settlement_source=m.settlement_source, resolves_at_ms=m.resolves_at_ms,
-        status=m.status, raw={},
+        status=m.status, raw=raw,
     )
 
 
