@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 from decimal import Decimal
 
 import httpx
@@ -144,7 +145,12 @@ async def run(settings: Settings | None = None) -> None:
             poly_taker_coefficient=Decimal(str(settings.poly_taker_fee_coefficient)),
             poly_maker_coefficient=Decimal(str(settings.poly_maker_fee_coefficient)),
         )
-        opp_sink = OpportunitySink()
+        opp_sink = OpportunitySink(
+            timeseries_floor_micros=(
+                settings.dislocation_log_floor_micros
+                if settings.dislocation_log_enabled else None
+            ),
+        )
 
         # --- Phase 4: risk manager + PAPER executor + kill switch ---
         positions_store = PositionsStore()
@@ -382,6 +388,28 @@ async def run(settings: Settings | None = None) -> None:
             "priority_sync", settings.priority_sync_seconds, priority_cycle
         )
         supervisor.run_periodic("opportunity_drain", 5, drain_opportunities)
+
+        if settings.dislocation_log_enabled:
+            settings.dislocation_log_path.parent.mkdir(parents=True, exist_ok=True)
+
+            async def drain_dislocations() -> None:
+                samples = opp_sink.drain_timeseries()
+                if not samples:
+                    return
+                lines = [
+                    json.dumps({"ts": ts, "pair": pid, "or": o,
+                                "net": net, "fire": fire})
+                    for (ts, pid, o, net, fire) in samples
+                ]
+                text = "\n".join(lines) + "\n"
+
+                def _write() -> None:
+                    with settings.dislocation_log_path.open("a") as f:
+                        f.write(text)
+
+                await asyncio.to_thread(_write)
+
+            supervisor.run_periodic("dislocation_drain", 1, drain_dislocations)
         supervisor.run_periodic("halt_watch", 10, halt.watch_once)
 
         # Phase 5: fee-param sync + divergence reconciliation (§6.4/§6.10).

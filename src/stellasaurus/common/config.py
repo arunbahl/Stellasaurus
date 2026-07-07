@@ -132,6 +132,14 @@ class Settings(BaseSettings):
     pairing_min_score: float = 0.35  # candidate token-overlap floor
     pairing_llm_concurrency: int = 8  # concurrent equivalence evals per cycle
 
+    # --- dislocation logging (measure how long θ-crossing gaps persist) ---
+    # When enabled, every evaluation whose net edge >= the floor is appended to
+    # dislocation_log_path as JSONL, so we can measure cross-venue gap durations
+    # during volatile windows (in-game). Off by default (no disk churn).
+    dislocation_log_enabled: bool = False
+    dislocation_log_floor_micros: int = -20_000  # capture the near-θ region (>= -2¢)
+    dislocation_log_path: Path = Path("data/dislocations.jsonl")
+
     # --- safety gate ---
     live_trading_enabled: bool = False
     # Re-entry cooldown after a non-hedged outcome (UNWOUND/FAILED) — damps

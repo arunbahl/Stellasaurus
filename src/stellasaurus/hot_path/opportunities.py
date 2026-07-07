@@ -46,11 +46,23 @@ class OpportunitySink:
     take the same lock briefly and copy. The evaluator is the only writer.
     """
 
-    def __init__(self, fired_maxlen: int = 500) -> None:
+    def __init__(
+        self,
+        fired_maxlen: int = 500,
+        *,
+        timeseries_floor_micros: Micros | None = None,
+        timeseries_maxlen: int = 200_000,
+    ) -> None:
         self._latest: dict[tuple[str, str], Opportunity] = {}
         self._fired: deque[Opportunity] = deque(maxlen=fired_maxlen)
         self._undrained: deque[Opportunity] = deque(maxlen=fired_maxlen)
         self._lock = threading.Lock()
+        # Dislocation time-series: EVERY evaluation whose net edge clears the
+        # floor is recorded (full WS resolution), so a background task can drain
+        # it to disk and we can measure how long θ-crossing gaps persist. None
+        # disables it. Sample = (ts_ms, pair_id, orientation, net_edge, fired).
+        self._ts_floor = timeseries_floor_micros
+        self._ts: deque[tuple[int, str, str, int, bool]] = deque(maxlen=timeseries_maxlen)
 
     def push(self, opp: Opportunity) -> None:
         with self._lock:
@@ -58,6 +70,15 @@ class OpportunitySink:
             if opp.would_fire:
                 self._fired.append(opp)
                 self._undrained.append(opp)
+            if (
+                self._ts_floor is not None
+                and opp.net_edge_micros is not None
+                and opp.net_edge_micros >= self._ts_floor
+            ):
+                self._ts.append((
+                    opp.created_wall_ms, opp.pair_id, opp.orientation,
+                    opp.net_edge_micros, opp.would_fire,
+                ))
 
     def latest(self) -> tuple[Opportunity, ...]:
         with self._lock:
@@ -72,6 +93,13 @@ class OpportunitySink:
         with self._lock:
             out = tuple(self._undrained)
             self._undrained.clear()
+        return out
+
+    def drain_timeseries(self) -> tuple[tuple[int, str, str, int, bool], ...]:
+        """Pop the dislocation samples accumulated since the last drain."""
+        with self._lock:
+            out = tuple(self._ts)
+            self._ts.clear()
         return out
 
     def prune(self, live_pair_ids: frozenset[str]) -> None:
