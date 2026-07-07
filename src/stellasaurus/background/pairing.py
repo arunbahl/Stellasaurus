@@ -18,11 +18,13 @@ LLM spend is bounded by ``max_llm_calls`` per cycle; already-evaluated leg pairs
 
 from __future__ import annotations
 
+import asyncio
 import re
 from dataclasses import dataclass
 
 from stellasaurus.background.equivalence import EquivalenceEngine, contract_from_market
 from stellasaurus.background.matchers import MatchedCandidate, run_matchers
+from stellasaurus.baml_client.types import EquivalenceVerdict
 from stellasaurus.common.clock import wall_ms
 from stellasaurus.common.ids import normalize_text, slugify, terms_fingerprint
 from stellasaurus.common.logging import audit, get_logger
@@ -127,6 +129,7 @@ class PairingLoop:
         publish: object,  # callable () -> RegistrySnapshot (RegistryLoader.publish)
         max_llm_calls: int = 10,
         min_score: float = 0.35,
+        llm_concurrency: int = 8,
     ) -> None:
         self._markets = markets_repo
         self._engine = engine
@@ -135,6 +138,7 @@ class PairingLoop:
         self._publish = publish
         self._max_llm_calls = max_llm_calls
         self._min_score = min_score
+        self._llm_concurrency = max(1, llm_concurrency)
 
     def _write_entry(
         self,
@@ -232,19 +236,33 @@ class PairingLoop:
             _log.warning("pairing_llm_skipped", queued=len(llm_queue),
                          reason="llm_not_configured")
         elif self._engine.configured:
-            for c in llm_queue:
-                if evaluated >= budget:
-                    break
-                if self._registry.find_by_legs(c.kalshi.native_id, c.poly.native_id):
+            # ``budget`` caps LLM CALLS this cycle. Evaluate up to that many
+            # candidates concurrently (network-bound; venue-independent), then
+            # write verdicts sequentially — SQLite writes stay single-threaded.
+            pending = [
+                c for c in llm_queue
+                if not self._registry.find_by_legs(c.kalshi.native_id, c.poly.native_id)
+            ][:budget]
+            sem = asyncio.Semaphore(self._llm_concurrency)
+
+            async def _eval(
+                c: MatchedCandidate,
+            ) -> tuple[MatchedCandidate, EquivalenceVerdict] | None:
+                async with sem:
+                    try:
+                        v = await self._engine.evaluate(
+                            contract_from_market(c.kalshi), contract_from_market(c.poly)
+                        )
+                        return c, v
+                    except Exception as exc:  # noqa: BLE001 - one flake must not kill the cycle
+                        _log.warning("pairing_eval_failed", kalshi=c.kalshi.native_id,
+                                     poly=c.poly.native_id, error=str(exc))
+                        return None
+
+            for res in await asyncio.gather(*(_eval(c) for c in pending)):
+                if res is None:
                     continue
-                try:
-                    verdict = await self._engine.evaluate(
-                        contract_from_market(c.kalshi), contract_from_market(c.poly)
-                    )
-                except Exception as exc:  # noqa: BLE001 - one bad eval must not kill the cycle
-                    _log.warning("pairing_eval_failed", kalshi=c.kalshi.native_id,
-                                 poly=c.poly.native_id, error=str(exc))
-                    continue
+                c, verdict = res
                 evaluated += 1
                 status, polarity, criteria = EquivalenceEngine.disposition(verdict)
                 self._write_entry(

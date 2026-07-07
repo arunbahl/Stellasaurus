@@ -130,6 +130,7 @@ class Settings(BaseSettings):
     pairing_refresh_seconds: int = 600
     pairing_max_llm_calls: int = 10  # per cycle — bounds LLM spend
     pairing_min_score: float = 0.35  # candidate token-overlap floor
+    pairing_llm_concurrency: int = 8  # concurrent equivalence evals per cycle
 
     # --- safety gate ---
     live_trading_enabled: bool = False

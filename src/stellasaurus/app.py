@@ -350,6 +350,7 @@ async def run(settings: Settings | None = None) -> None:
             publish=loader.publish,
             max_llm_calls=settings.pairing_max_llm_calls,
             min_score=settings.pairing_min_score,
+            llm_concurrency=settings.pairing_llm_concurrency,
         )
         if settings.pairing_enabled and engine.configured:
 
