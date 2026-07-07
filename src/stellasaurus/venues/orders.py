@@ -285,9 +285,9 @@ class PolymarketOrderGateway:
             for ex in execs:
                 q = float(ex.get("quantity") or ex.get("qty") or 0)
                 px = ex.get("price") or ex.get("px") or {}
-                pxv = float(px.get("value") if isinstance(px, dict) else px or 0)
+                pxv = float((px.get("value") if isinstance(px, dict) else px) or 0)
                 com = ex.get("commission") or ex.get("commissionNotional") or {}
-                comv = float(com.get("value") if isinstance(com, dict) else com or 0)
+                comv = float((com.get("value") if isinstance(com, dict) else com) or 0)
                 f += q
                 n += q * pxv
                 c += comv
@@ -315,7 +315,7 @@ class PolymarketOrderGateway:
             filled = float(cum)
             if not notional:  # no execution detail -> use the order's avg price
                 avg = order.get("avgPx") or order.get("averagePrice") or order.get("price")
-                avgv = float(avg.get("value") if isinstance(avg, dict) else avg or 0)
+                avgv = float((avg.get("value") if isinstance(avg, dict) else avg) or 0)
                 notional = filled * avgv
         avg_micros = int(round(notional / filled * 1_000_000)) if filled else None
         fees_micros = int(round(fees * 1_000_000)) if fees else None

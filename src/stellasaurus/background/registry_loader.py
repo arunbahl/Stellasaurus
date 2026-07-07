@@ -48,7 +48,8 @@ class RegistryLoader:
         if not self._seed_path.exists():
             return []
         doc = yaml.safe_load(self._seed_path.read_text("utf-8")) or {}
-        return doc.get("pairs", [])
+        pairs: list[dict[str, object]] = doc.get("pairs", [])
+        return pairs
 
     async def resolve_seed_markets(self, clients: dict[Venue, VenueClient]) -> int:
         """Fetch each seeded pair's two markets DIRECTLY and upsert them.

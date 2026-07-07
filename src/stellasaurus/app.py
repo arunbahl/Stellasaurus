@@ -41,6 +41,7 @@ from stellasaurus.hot_path.latency import LatencyRecorder
 from stellasaurus.hot_path.opportunities import OpportunitySink
 from stellasaurus.hot_path.positions import PositionsStore
 from stellasaurus.hot_path.risk import RiskManager
+from stellasaurus.hot_path.seams import TradeIntent
 from stellasaurus.hot_path.snapshot import LimitsSnapshot, RegistrySnapshot
 from stellasaurus.hot_path.state import HotStateStore
 from stellasaurus.storage.audit_repo import AuditRepo
@@ -182,7 +183,9 @@ async def run(settings: Settings | None = None) -> None:
                     on_release=risk.release,  # frees a HANGING pair's slot once flat
                 )
 
-                async def _requote(intent):  # noqa: ANN001, ANN202
+                async def _requote(
+                    intent: TradeIntent,
+                ) -> tuple[int, int] | None:
                     entry = store.registry().by_id.get(intent.pair_id)
                     if entry is None:
                         return None
@@ -408,7 +411,7 @@ async def run(settings: Settings | None = None) -> None:
             )
             # With multiple servers in one process, let asyncio/KeyboardInterrupt
             # drive shutdown instead of each server fighting over signal handlers.
-            server.install_signal_handlers = lambda: None  # type: ignore[method-assign]
+            setattr(server, "install_signal_handlers", lambda: None)  # noqa: B010
             servers.append(server)
         _log.info(
             "dashboard_ready",

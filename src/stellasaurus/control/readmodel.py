@@ -19,9 +19,15 @@ from stellasaurus.hot_path.state import HotStateStore
 class ReadModel:
     def __init__(self, store: HotStateStore) -> None:
         self._store = store
-        # set by the composition root after construction
+        # Providers wired by the composition root after construction (Any-typed:
+        # they cross the hot-path boundary and are duck-typed reads only).
         self.feed_stats_provider: Any = lambda: []
         self.catalog_stats_provider: Any = lambda: {}
+        self.opportunity_sink: Any = None
+        self.positions_store: Any = None
+        self.risk_manager: Any = None
+        self.pnl_totals_provider: Any = None
+        self.latency_provider: Any = None
 
     # --- health ---
     def health(self) -> dict[str, Any]:

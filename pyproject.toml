@@ -84,3 +84,8 @@ follow_imports = "skip"
 [[tool.mypy.overrides]]
 module = "stellasaurus.hot_path.*"
 disallow_any_explicit = false
+
+# PyYAML ships no type stubs; the seed loader casts its result explicitly.
+[[tool.mypy.overrides]]
+module = "yaml"
+ignore_missing_imports = true

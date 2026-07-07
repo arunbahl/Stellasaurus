@@ -41,7 +41,8 @@ class PolymarketClient(VenueClient):
             headers = self._signer.headers(timestamp_ms=wall_ms(), method="GET", path=path)
         resp = await self._http.get(f"{self._base}{path}", params=params, headers=headers)
         resp.raise_for_status()
-        return resp.json()
+        data: dict[str, Any] = resp.json()
+        return data
 
     async def list_markets(self) -> list[RawMarket]:
         # Pagination is OFFSET-based (a `cursor` param is silently ignored, and the

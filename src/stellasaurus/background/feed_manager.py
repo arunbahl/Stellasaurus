@@ -14,6 +14,7 @@ with backoff while it is the current plan.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
 
 from stellasaurus.background.subscription_mgr import SubscriptionManager
 from stellasaurus.common.logging import get_logger
@@ -81,7 +82,7 @@ class FeedManager:
         self._tasks = []
 
     @staticmethod
-    async def _run_feed(runner, *, name: str) -> None:  # noqa: ANN001
+    async def _run_feed(runner: Callable[[], Awaitable[None]], *, name: str) -> None:
         """Crash-restart with backoff for one feed, until cancelled by a re-plan."""
         backoff = 1.0
         while True:

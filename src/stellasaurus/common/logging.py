@@ -8,7 +8,7 @@ required by DESIGN §6.11.
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, Protocol
 
 import structlog
 
@@ -33,8 +33,9 @@ def get_logger(name: str) -> structlog.stdlib.BoundLogger:
     return logger
 
 
-# Lightweight protocol to avoid importing storage into common.
-class _AuditSink:
+# Lightweight structural protocol so any repo with a matching append() (e.g.
+# storage.AuditRepo) satisfies it without common importing storage.
+class _AuditSink(Protocol):
     def append(
         self, *, actor: str, event_type: str, pair_id: str | None, detail: dict[str, Any]
     ) -> None: ...

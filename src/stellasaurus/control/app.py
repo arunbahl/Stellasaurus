@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
+from typing import Any
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
@@ -34,31 +35,31 @@ def create_app(
         return (_STATIC / "index.html").read_text("utf-8")
 
     @app.get("/health")
-    async def health() -> dict:
+    async def health() -> dict[str, Any]:
         return read_model.health()
 
     @app.get("/pairs")
-    async def pairs() -> list:
+    async def pairs() -> list[dict[str, Any]]:
         return read_model.pairs()
 
     @app.get("/catalog/stats")
-    async def catalog_stats() -> dict:
+    async def catalog_stats() -> dict[str, Any]:
         return read_model.catalog_stats()
 
     @app.get("/books")
-    async def books() -> list:
+    async def books() -> list[dict[str, Any]]:
         return read_model.all_book_views()
 
     @app.get("/opportunities")
-    async def opportunities() -> dict:
+    async def opportunities() -> dict[str, Any]:
         return read_model.opportunities()
 
     @app.get("/positions")
-    async def positions() -> dict:
+    async def positions() -> dict[str, Any]:
         return read_model.positions()
 
     @app.post("/halt")
-    async def set_halt(body: dict) -> dict:
+    async def set_halt(body: dict[str, Any]) -> dict[str, Any]:
         if halt_controller is None:
             return {"error": "controls not wired"}
         halted = bool(body.get("halted", True))
@@ -67,14 +68,14 @@ def create_app(
         return {"halted": halted}
 
     @app.post("/limits")
-    async def set_limits(body: dict) -> dict:
+    async def set_limits(body: dict[str, Any]) -> dict[str, Any]:
         if halt_controller is None:
             return {"error": "controls not wired"}
         errors = halt_controller.update_limits(body, actor="dashboard")  # type: ignore[attr-defined]
         return {"errors": errors, "applied": [k for k in body if k not in errors]}
 
     @app.get("/books/{pair_id}")
-    async def book(pair_id: str) -> dict:
+    async def book(pair_id: str) -> dict[str, Any]:
         return read_model.book_view(pair_id)
 
     @app.websocket("/ws")

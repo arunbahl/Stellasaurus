@@ -36,7 +36,7 @@ class NativeBook:
     venue: Venue
     native_id: str
     yes_bids: tuple[PriceLevel, ...]
-    yes_asks: tuple[PriceLevel, ...]
+    yes_asks: tuple[PriceLevel, ...] | None  # None when the venue publishes only bids
     no_bids: tuple[PriceLevel, ...] | None
     no_asks: tuple[PriceLevel, ...] | None
     seq: int

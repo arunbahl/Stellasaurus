@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Sequence
+from typing import Any
 
 import websockets
 
@@ -71,7 +72,7 @@ class KalshiStream:
                 backoff = min(backoff * 2, 30.0)
 
     @staticmethod
-    def _price_micros(value: object) -> int | None:
+    def _price_micros(value: Any) -> int | None:
         """Dollar-string ('0.0100') or integer-cents price -> micros."""
         try:
             if isinstance(value, str):
@@ -83,7 +84,7 @@ class KalshiStream:
         return None
 
     @staticmethod
-    def _size(value: object) -> int:
+    def _size(value: Any) -> int:
         try:
             return int(round(float(value)))  # sizes may be fractional strings
         except (TypeError, ValueError):

@@ -119,19 +119,19 @@ class SubscriptionManager:
                 ]
             return [self._poll_feed(client, ids, on_book)]
         else:
-            client = PolymarketClient(self._settings, self._http)
+            pclient = PolymarketClient(self._settings, self._http)
             if self._settings.poly_credentials_present:
-                signer = PolymarketSigner(
+                psigner = PolymarketSigner(
                     self._settings.poly_access_key or "", self._settings.poly_ed25519_seed or ""
                 )
                 shards = shard(
                     ids, max_per_conn=self._settings.poly_markets_per_conn, max_conns=10_000
                 )
                 return [
-                    self._ws_feed(PolymarketStream(self._settings, signer), s, on_book)
+                    self._ws_feed(PolymarketStream(self._settings, psigner), s, on_book)
                     for s in shards
                 ]
-            return [self._poll_feed(client, ids, on_book)]
+            return [self._poll_feed(pclient, ids, on_book)]
 
     def _poll_feed(self, client, ids, on_book) -> PlannedFeed:  # type: ignore[no-untyped-def]
         feed = RestPollFeed(client=client, interval_ms=self._settings.rest_poll_interval_ms)

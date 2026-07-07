@@ -171,15 +171,13 @@ limits (θ, hurdle, sizing, exposure caps) become editable from the dashboard.
 ```bash
 pytest -m "not live"          # fast, offline: unit + replay (pass this explicitly)
 pytest -m live                # hits real public venue endpoints
-uv run ruff check src/ tests/ # lint — clean
-uv run mypy                   # strict type check (see note)
+uv run ruff check src/ tests/ # lint
+uv run mypy                   # strict type check (whole package)
 ```
 
 `pytest` alone runs everything including the `live` network tests; pass
-`-m "not live"` for the offline suite. Ruff is clean. Type checking is strict
-mypy over the whole package: the hot-path core (`stellasaurus.hot_path`) is clean;
-some background/control/venue modules from earlier phases still have known gaps
-being tightened.
+`-m "not live"` for the offline suite. All three — ruff, strict mypy over the
+whole package, and the offline test suite — pass clean.
 
 ## BAML
 

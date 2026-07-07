@@ -69,7 +69,7 @@ class MarketsRepo:
             )
             conn.commit()
         if prior_fp is not None and prior_fp != market.terms_fingerprint:
-            return prior_fp
+            return str(prior_fp)
         return None
 
     def upsert_many(self, markets: list[MarketRow]) -> list[tuple[str, str]]:

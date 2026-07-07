@@ -19,6 +19,7 @@ Auto-triggers (v1):
 from __future__ import annotations
 
 from dataclasses import replace
+from typing import Any
 
 from stellasaurus.common.clock import Clock, SystemClock
 from stellasaurus.common.logging import audit, get_logger
@@ -73,7 +74,7 @@ class HaltController:
 
     # --- [UI] limits (§6.9 safe propagation) ---
 
-    def update_limits(self, changes: dict[str, object], *, actor: str) -> dict[str, str]:
+    def update_limits(self, changes: dict[str, Any], *, actor: str) -> dict[str, str]:
         """Apply valid changes; returns {field: error} for rejected ones."""
         limits = self._store.limits()
         errors: dict[str, str] = {}
@@ -83,7 +84,7 @@ class HaltController:
                 errors[field] = "not a UI-settable limit"
                 continue
             try:
-                num = int(value) if field in _INT_FIELDS else float(value)  # type: ignore[arg-type]
+                num = int(value) if field in _INT_FIELDS else float(value)
             except (TypeError, ValueError):
                 errors[field] = "not numeric"
                 continue
