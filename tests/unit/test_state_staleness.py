@@ -88,3 +88,26 @@ def test_quiet_book_on_live_feed_stays_fresh():
         store.publish_book(normalize(other, polarity=OutcomePolarity.DIRECT,
                                      pair_id="other-pair"))
     assert store.is_fresh("p") is True  # quiet book, live feed -> fresh
+
+
+def test_frozen_book_is_stale_beyond_max_quiet_even_on_live_feed():
+    """A settled/resolved market's book freezes; a still-live feed would keep it
+    'fresh' forever, manufacturing a post-match phantom. The max-quiet bound
+    marks a long-frozen book stale despite the venue being alive."""
+    clock = FakeClock()
+    store = HotStateStore(
+        registry=RegistrySnapshot.build(1, [PairRegistryEntry(
+            "p", "prop", "KX", "slug", OutcomePolarity.DIRECT, PairStatus.VERIFIED,
+            None, None, 0, "fp", PairSource.MANUAL_SEED)]),
+        limits=_limits(), book_staleness_ms=2000, book_max_quiet_ms=600_000, clock=clock,
+    )
+    store.publish_book(_book(Venue.KALSHI, recv_mono_ns=0))
+    store.publish_book(_book(Venue.POLYMARKET, recv_mono_ns=0))
+    # keep BOTH feeds demonstrably alive with fresh frames for OTHER markets...
+    clock.t = 700_000 * 1_000_000  # 700s later (> 600s max_quiet)
+    for v in (Venue.KALSHI, Venue.POLYMARKET):
+        other = NativeBook(v, "other", (PriceLevel(500_000, 1),), (PriceLevel(510_000, 1),),
+                           None, None, 2, clock.t - 1_000_000, 0)
+        store.publish_book(normalize(other, polarity=OutcomePolarity.DIRECT, pair_id="other"))
+    # ...but pair "p"'s own books are frozen at t=0 -> beyond max_quiet -> stale
+    assert store.is_fresh("p") is False

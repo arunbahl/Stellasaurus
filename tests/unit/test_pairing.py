@@ -231,3 +231,39 @@ async def test_versus_polarity_override_and_ambiguous_reject(tmp_path):
     # WNBA: ambiguous polarity -> rejected deterministically, LLM NOT consulted
     assert entries["K-WNBA"].status is PairStatus.NOT_EQUIVALENT
     assert engine.calls == 1  # only the UFC pair reached the LLM
+
+
+async def test_polarity_audit_corrects_wrong_verified_polarity(tmp_path):
+    """A versus pair verified (wrongly) DIRECT — e.g. before its outcomes were in
+    the catalog — is corrected to the resolver's INVERTED by the re-audit."""
+    import json as _json
+
+    from stellasaurus.hot_path.snapshot import PairRegistryEntry
+    from stellasaurus.storage.markets_repo import MarketRow
+    from stellasaurus.venues.base import market_fingerprint
+    registry, markets, audit_repo, loader, store = _fixture(tmp_path)
+
+    def put(venue, nid, title, raw):
+        m = RawMarket(venue, nid, title, title, "src", T0, "open", raw)
+        markets.upsert(MarketRow(
+            venue=venue, native_id=nid, title=title, rules_text=title,
+            settlement_source="src", resolves_at_ms=T0, status="open",
+            terms_fingerprint=market_fingerprint(m), raw_json=_json.dumps(raw)))
+
+    put(Venue.KALSHI, "K-BLG", "Bilibili Gaming vs Hanwha",
+        {"yes_sub_title": "Bilibili Gaming", "rules_primary": "If Bilibili Gaming wins"})
+    put(Venue.POLYMARKET, "P-BLG", "Bilibili vs Hanwha",
+        {"outcomes": _json.dumps(["Bilibili Gaming", "Hanwha Life Esports"])})
+    # seed the registry with the WRONG polarity (resolver would say DIRECT)
+    registry.upsert(PairRegistryEntry(
+        "llm-k-blg--p-blg", "prop", "K-BLG", "P-BLG", OutcomePolarity.INVERTED,
+        PairStatus.VERIFIED, T0, None, 0, "fp", PairSource.LLM))
+
+    loop = PairingLoop(
+        markets_repo=markets, engine=FakeEngine(set()), registry_repo=registry,
+        audit_repo=audit_repo, publish=loader.publish, max_llm_calls=10,
+    )
+    corrected = loop.audit_polarity()
+    assert corrected == 1
+    entry = {e.kalshi_ticker: e for e in registry.all_entries()}["K-BLG"]
+    assert entry.outcome_polarity is OutcomePolarity.DIRECT  # fixed

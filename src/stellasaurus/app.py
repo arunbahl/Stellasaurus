@@ -106,6 +106,7 @@ async def run(settings: Settings | None = None) -> None:
         registry=RegistrySnapshot.empty(),
         limits=_limits_from_settings(settings),
         book_staleness_ms=settings.book_staleness_ms,
+        book_max_quiet_ms=settings.book_max_quiet_ms,
     )
     latency = LatencyRecorder()
     book_store = BookStore(store, latency=latency)
@@ -411,6 +412,17 @@ async def run(settings: Settings | None = None) -> None:
 
             supervisor.run_periodic("dislocation_drain", 1, drain_dislocations)
         supervisor.run_periodic("halt_watch", 10, halt.watch_once)
+
+        async def polarity_audit() -> None:
+            # DB reads + upserts off the event loop; a correction re-publishes the
+            # registry, and FeedManager's route-refresh re-normalizes the books.
+            n = await asyncio.to_thread(pairing.audit_polarity)
+            if n:
+                _log.warning("polarity_audit_ran", corrected=n)
+
+        supervisor.run_periodic(
+            "polarity_audit", settings.polarity_audit_seconds, polarity_audit
+        )
 
         # Phase 5: fee-param sync + divergence reconciliation (§6.4/§6.10).
         fee_sync = FeeParamSync(

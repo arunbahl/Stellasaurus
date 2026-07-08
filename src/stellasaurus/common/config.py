@@ -38,6 +38,11 @@ class Settings(BaseSettings):
     # --- timing ---
     catalog_refresh_seconds: int = 300
     book_staleness_ms: int = 2000
+    # A book that hasn't updated in this long is stale even on a live feed
+    # (guards against a settled/resolved market's frozen book being evaluated).
+    book_max_quiet_ms: int = 600_000
+    # Re-check verified versus pairs' polarity against the deterministic resolver.
+    polarity_audit_seconds: int = 120
     rest_poll_interval_ms: int = 1000
     dashboard_push_interval_ms: int = 250
 

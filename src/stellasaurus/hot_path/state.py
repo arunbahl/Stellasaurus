@@ -46,6 +46,7 @@ class HotStateStore:
         limits: LimitsSnapshot,
         book_staleness_ms: int,
         clock: Clock | None = None,
+        book_max_quiet_ms: int = 600_000,
     ) -> None:
         self._registry: AtomicRef[RegistrySnapshot] = AtomicRef(registry)
         self._limits: AtomicRef[LimitsSnapshot] = AtomicRef(limits)
@@ -53,6 +54,11 @@ class HotStateStore:
         self._books: dict[tuple[str, Venue], AtomicRef[NormalizedBook]] = {}
         self._books_lock = threading.Lock()
         self._staleness_ns = book_staleness_ms * 1_000_000
+        # A book that has NOT updated in this long is stale even if its venue
+        # feed is alive — a settled/resolved market whose book froze at final
+        # prices must not be treated as a live quote (it manufactured a
+        # post-match phantom edge against the other, still-live, venue).
+        self._max_quiet_ns = book_max_quiet_ms * 1_000_000
         self._clock = clock or SystemClock()
         # Last frame received per venue across ALL markets. Delta feeds only
         # push on change, so an unchanged book is still trustworthy while its
@@ -89,9 +95,13 @@ class HotStateStore:
             book = self.book(pair_id, venue)
             if book is None:
                 return False
-            book_fresh = now - book.recv_mono_ns <= self._staleness_ns
+            book_age = now - book.recv_mono_ns
+            if book_age <= self._staleness_ns:
+                continue  # book itself is fresh
             venue_fresh = now - self._venue_frame[venue].get() <= self._staleness_ns
-            if not (book_fresh or venue_fresh):
+            # A quiet-but-live feed keeps an unchanged book valid — but only up
+            # to _max_quiet_ns; beyond that the book is presumed frozen/settled.
+            if not (venue_fresh and book_age <= self._max_quiet_ns):
                 return False
         return True
 

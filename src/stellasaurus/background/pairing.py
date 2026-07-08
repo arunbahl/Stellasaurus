@@ -155,6 +155,37 @@ class PairingLoop:
         self._min_score = min_score
         self._llm_concurrency = max(1, llm_concurrency)
 
+    def audit_polarity(self) -> int:
+        """Re-check every VERIFIED versus pair's polarity against the current
+        deterministic resolver and correct any drift. Fixes pairs verified before
+        the catalog had the Polymarket `outcomes` populated (they fell through as
+        non-versus and got the LLM's unreliable polarity guess, which find_by_legs
+        then protected). Returns the number corrected."""
+        from dataclasses import replace
+        corrected = 0
+        for entry in self._registry.all_entries():
+            if entry.status is not PairStatus.VERIFIED:
+                continue
+            k_row = self._markets.get(Venue.KALSHI, entry.kalshi_ticker)
+            p_row = self._markets.get(Venue.POLYMARKET, entry.poly_market_slug)
+            if k_row is None or p_row is None:
+                continue
+            poly = _row_to_raw(p_row)
+            if _poly_versus_outcomes(poly) is None:
+                continue  # not a versus market
+            pol = resolve_versus_polarity(_row_to_raw(k_row), poly)
+            if pol is not None and pol is not entry.outcome_polarity:
+                self._registry.upsert(replace(
+                    entry, outcome_polarity=pol, last_verified_at_ms=wall_ms()))
+                audit(self._audit, actor="polarity_audit",
+                      event_type="POLARITY_CORRECTED", pair_id=entry.pair_id,
+                      was=entry.outcome_polarity.value, now=pol.value)
+                corrected += 1
+        if corrected:
+            self._publish()  # type: ignore[operator]
+            _log.warning("polarity_audit_corrected", count=corrected)
+        return corrected
+
     def _write_entry(
         self,
         *,
