@@ -266,12 +266,18 @@ class PairingLoop:
                 llm_queue.append(c)
 
         # 2) Generic token candidates for anything the matchers didn't cover.
-        for g in generate_candidates(kalshi, poly, min_score=self._min_score):
-            key = (g.kalshi.native_id, g.poly.native_id)
-            if key not in matched_legs:
-                llm_queue.append(
-                    MatchedCandidate(g.kalshi, g.poly, g.score, "token")
-                )
+        #    This scans the FULL catalog (tens of thousands of markets each side,
+        #    ~tens of seconds) and only feeds the LLM queue — so skip it entirely
+        #    on a structured-only pass (budget 0), where it would just block the
+        #    event loop (freezing feeds + the evaluator) for nothing.
+        cycle_budget = self._max_llm_calls if llm_budget is None else llm_budget
+        if cycle_budget > 0:
+            for g in generate_candidates(kalshi, poly, min_score=self._min_score):
+                key = (g.kalshi.native_id, g.poly.native_id)
+                if key not in matched_legs:
+                    llm_queue.append(
+                        MatchedCandidate(g.kalshi, g.poly, g.score, "token")
+                    )
 
         # 3) Versus polarity resolution (deterministic) applied to ALL LLM
         #    candidates regardless of how they were generated: a two-outcome
@@ -301,7 +307,7 @@ class PairingLoop:
         llm_queue = remaining
 
         # 4) LLM evaluation for the remainder, budget-capped.
-        budget = self._max_llm_calls if llm_budget is None else llm_budget
+        budget = cycle_budget
         evaluated = 0
         if budget == 0:
             pass  # structured-only pass
