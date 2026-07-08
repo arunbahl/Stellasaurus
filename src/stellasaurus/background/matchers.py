@@ -219,8 +219,22 @@ def _tokset(text: str) -> frozenset[str]:
 
 
 def _poly_versus_outcomes(m: RawMarket) -> tuple[str, str] | None:
-    """(outcome0, outcome1) if the Poly market has two NAMED outcomes; else None.
-    Poly returns ``outcomes`` as a JSON string, and Yes/No markets are not versus."""
+    """(YES-entity, NO-entity) for a two-named-outcome market, or None.
+
+    PREFERS ``marketSides``: the side with ``long: True`` is the entity the book
+    (our canonical YES) actually tracks. The ``outcomes`` array is NOT reliable —
+    Polymarket has been observed to reorder it OUT OF SYNC with the real long
+    side (e.g. UFC: outcomes[0]="McGregor" while the long side is "Holloway"),
+    which manufactured a 27c phantom. Only fall back to ``outcomes`` when sides
+    are absent (test fixtures / markets that don't expose them)."""
+    sides = m.raw.get("marketSides")
+    if isinstance(sides, list) and len(sides) == 2:
+        yes = next((s for s in sides if isinstance(s, dict) and s.get("long")), None)
+        no = next((s for s in sides if isinstance(s, dict) and not s.get("long")), None)
+        if isinstance(yes, dict) and isinstance(no, dict):
+            yd, nd = str(yes.get("description") or ""), str(no.get("description") or "")
+            if yd and nd and not {yd.lower(), nd.lower()} <= {"yes", "no"}:
+                return yd, nd
     raw = m.raw.get("outcomes")
     if isinstance(raw, str):
         try:

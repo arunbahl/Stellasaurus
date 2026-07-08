@@ -162,3 +162,25 @@ def test_versus_polarity_none_for_yesno_and_ambiguous():
     amb = _versus_market(Venue.POLYMARKET, "p", "t",
                          outcomes=json.dumps(["Valkyries", "Chicago"]))
     assert resolve_versus_polarity(k, amb) is None
+
+
+def test_versus_polarity_uses_marketsides_over_desynced_outcomes():
+    """Polymarket's outcomes array can desync from the real long side. Resolve
+    from marketSides (long:True = the book's YES entity), not outcomes order."""
+    import json
+
+    from stellasaurus.background.matchers import resolve_versus_polarity
+    from stellasaurus.common.types import OutcomePolarity, Venue
+    from stellasaurus.venues.base import RawMarket
+    k = RawMarket(Venue.KALSHI, "K", "McGregor vs Holloway", "If Conor McGregor wins",
+                  None, 1_783_497_600_000, "open", {"yes_sub_title": "Conor McGregor"})
+    # outcomes LIES (McGregor first) but marketSides says the long side is Holloway
+    p = RawMarket(Venue.POLYMARKET, "p", "fight", "r", None, 1_783_497_600_000, "open", {
+        "outcomes": json.dumps(["Conor McGregor", "Max Holloway"]),
+        "marketSides": [
+            {"long": True, "description": "Max Holloway", "price": "0.64"},
+            {"long": False, "description": "Conor McGregor", "price": "0.37"},
+        ],
+    })
+    # Kalshi-YES (McGregor) == the SHORT side -> INVERTED (outcomes[0] would say DIRECT)
+    assert resolve_versus_polarity(k, p) is OutcomePolarity.INVERTED
