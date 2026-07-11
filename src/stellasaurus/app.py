@@ -438,6 +438,16 @@ async def run(settings: Settings | None = None) -> None:
         if live_flattener is not None:
             supervisor.supervise("flattener", live_flattener.run)
 
+        if settings.requote_probe_enabled:
+            from stellasaurus.background.requote_probe import RequoteProbe
+            probe = RequoteProbe(
+                clients=clients, store=store, fee_params=fee_params,
+                opp_sink=opp_sink, log_path=settings.requote_probe_log_path,
+                theta_micros=settings.theta_micros,
+                min_interval_s=settings.requote_probe_min_interval_s,
+            )
+            supervisor.supervise("requote_probe", probe.run)
+
         hosts = resolve_bind_hosts(settings.dashboard_expose, settings.dashboard_host)
         servers = []
         for host in hosts:

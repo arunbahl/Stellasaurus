@@ -144,6 +144,11 @@ class Settings(BaseSettings):
     dislocation_log_enabled: bool = False
     dislocation_log_floor_micros: int = -20_000  # capture the near-θ region (>= -2¢)
     dislocation_log_path: Path = Path("data/dislocations.jsonl")
+    # Requote-survival probe: re-check would-fire edges against FRESH REST books
+    # (the mirage filter — a real edge survives, a feed-lag artifact evaporates).
+    requote_probe_enabled: bool = False
+    requote_probe_log_path: Path = Path("data/requote_probe.jsonl")
+    requote_probe_min_interval_s: float = 5.0
 
     # --- safety gate ---
     live_trading_enabled: bool = False
