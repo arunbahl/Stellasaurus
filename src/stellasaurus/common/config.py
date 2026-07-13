@@ -149,6 +149,10 @@ class Settings(BaseSettings):
     requote_probe_enabled: bool = False
     requote_probe_log_path: Path = Path("data/requote_probe.jsonl")
     requote_probe_min_interval_s: float = 5.0
+    # Maker/rebate strategy measurement: simulate resting Poly maker fills and
+    # log the fill-conditional hedge economics + hedge-race drift (no real orders).
+    maker_sim_enabled: bool = False
+    maker_sim_log_path: Path = Path("data/maker_sim.jsonl")
 
     # --- safety gate ---
     live_trading_enabled: bool = False

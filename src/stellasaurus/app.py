@@ -448,6 +448,14 @@ async def run(settings: Settings | None = None) -> None:
             )
             supervisor.supervise("requote_probe", probe.run)
 
+        if settings.maker_sim_enabled:
+            from stellasaurus.background.maker_sim import MakerSim
+            maker_sim = MakerSim(
+                store=store, fee_params=fee_params,
+                log_path=settings.maker_sim_log_path,
+            )
+            supervisor.supervise("maker_sim", maker_sim.run)
+
         hosts = resolve_bind_hosts(settings.dashboard_expose, settings.dashboard_host)
         servers = []
         for host in hosts:
