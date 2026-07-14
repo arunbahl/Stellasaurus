@@ -1,15 +1,27 @@
-"""Requote-survival probe — the mirage filter.
+"""Requote-survival probe — the mirage filter (concurrent + persistence).
 
 A would-fire edge on the STREAMED books can be a feed-lag mirage: during a fast
 move one venue's book lags the other within the freshness window, so an apparent
 gap evaporates the instant the lagging feed catches up. The live engine already
 guards against this by RE-QUOTING (a fresh REST fetch) before firing; this probe
-applies the same test out-of-band and logs whether each would-fire edge SURVIVES
-a requote — separating real, tradeable dislocations from lag artifacts.
+applies the same test out-of-band and logs whether each would-fire edge SURVIVES.
 
-For every pair currently flagged would_fire (rate-limited per pair), it fetches
-both venues' books fresh, recomputes the best-orientation net edge exactly as the
-evaluator does, and appends {streamed_net, requoted_net, survived} to a JSONL.
+Two hardenings over a naive single requote, aimed at the weather-market signal:
+
+  - CONCURRENT fetch. Both venues' books are pulled with a single
+    ``asyncio.gather`` rather than ``await k; await p``. A sequential fetch leaves
+    a few-hundred-ms skew between the two snapshots, which in an intraday-volatile
+    temperature market (the day's high firming up) can manufacture an edge that
+    isn't simultaneously executable. Gather removes that skew.
+
+  - PERSISTENCE. A real, tradeable dislocation persists for more than one instant;
+    a timing artifact does not. Each would-fire pair is requoted ``persist_probes``
+    times spaced ``persist_spacing_s`` apart, and we record the full net series
+    plus how many cleared theta. ``survived_all`` (every probe cleared) is the
+    strict, trust-worthy signal.
+
+Appends one JSONL record per probed pair: {streamed_net, requote_nets[],
+survived_count, survived_all, span_ms}.
 """
 
 from __future__ import annotations
@@ -26,6 +38,7 @@ from stellasaurus.hot_path.book import walk_book_for_size
 from stellasaurus.hot_path.fees import FeeParams, kalshi_fee_micros, poly_fee_micros
 from stellasaurus.hot_path.normalize import normalize
 from stellasaurus.hot_path.opportunities import OpportunitySink
+from stellasaurus.hot_path.snapshot import PairRegistryEntry
 from stellasaurus.hot_path.state import HotStateStore
 from stellasaurus.venues.base import VenueClient
 
@@ -44,6 +57,9 @@ class RequoteProbe:
         theta_micros: Micros,
         min_interval_s: float = 5.0,
         poll_interval_s: float = 2.0,
+        persist_probes: int = 5,
+        persist_spacing_s: float = 1.0,
+        max_per_cycle: int = 6,
     ) -> None:
         self._clients = clients
         self._store = store
@@ -53,6 +69,9 @@ class RequoteProbe:
         self._theta = theta_micros
         self._min_interval_ms = int(min_interval_s * 1000)
         self._poll = poll_interval_s
+        self._persist_probes = max(1, persist_probes)
+        self._persist_spacing_s = persist_spacing_s
+        self._max_per_cycle = max_per_cycle
         self._last: dict[str, int] = {}
 
     def _fee(self, venue: Venue, qty: int, price: Micros, *, series: str, slug: str) -> Micros:
@@ -82,6 +101,26 @@ class RequoteProbe:
                 best = (orient, net)
         return best
 
+    async def _requote(
+        self, entry: PairRegistryEntry, qty: int, pair_id: str
+    ) -> Micros | None:
+        """One CONCURRENT requote -> best-orientation net (None on any failure)."""
+        try:
+            kb, pb = await asyncio.gather(
+                self._clients[Venue.KALSHI].get_book(entry.kalshi_ticker),
+                self._clients[Venue.POLYMARKET].get_book(entry.poly_market_slug),
+            )
+        except Exception as exc:  # noqa: BLE001
+            _log.warning("requote_fetch_failed", pair_id=pair_id, error=str(exc))
+            return None
+        if kb is None or pb is None:
+            return None
+        series = entry.kalshi_ticker.split("-", 1)[0]
+        kn = normalize(kb, polarity=OutcomePolarity.DIRECT, pair_id=pair_id)
+        pn = normalize(pb, polarity=entry.outcome_polarity, pair_id=pair_id)
+        best = self._net(kn, pn, qty, series, entry.poly_market_slug)
+        return best[1] if best else None
+
     async def run(self) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         while True:
@@ -93,38 +132,35 @@ class RequoteProbe:
 
     async def _probe_once(self) -> None:
         now = wall_ms()
-        fires = {
-            o.pair_id: o for o in self._sink.latest()
+        fires = [
+            o for o in self._sink.latest()
             if o.would_fire and now - self._last.get(o.pair_id, 0) >= self._min_interval_ms
-        }
+        ]
         if not fires:
             return
+        # Bound work per cycle: persistence is ~persist_probes*spacing s per pair.
+        fires = fires[: self._max_per_cycle]
         reg = self._store.registry()
         lines: list[str] = []
-        for pair_id, opp in fires.items():
-            self._last[pair_id] = now
-            entry = reg.by_id.get(pair_id)
+        for opp in fires:
+            self._last[opp.pair_id] = now
+            entry = reg.by_id.get(opp.pair_id)
             if entry is None:
                 continue
-            series = entry.kalshi_ticker.split("-", 1)[0]
-            try:
-                kb = await self._clients[Venue.KALSHI].get_book(entry.kalshi_ticker)
-                pb = await self._clients[Venue.POLYMARKET].get_book(entry.poly_market_slug)
-            except Exception as exc:  # noqa: BLE001
-                _log.warning("requote_fetch_failed", pair_id=pair_id, error=str(exc))
-                continue
-            if kb is None or pb is None:
-                continue
-            kn = normalize(kb, polarity=OutcomePolarity.DIRECT, pair_id=pair_id)
-            pn = normalize(pb, polarity=entry.outcome_polarity, pair_id=pair_id)
-            fresh = self._net(kn, pn, opp.qty, series, entry.poly_market_slug)
-            requoted = fresh[1] if fresh else None
-            survived = requoted is not None and requoted >= self._theta
+            nets: list[Micros | None] = []
+            for i in range(self._persist_probes):
+                if i:
+                    await asyncio.sleep(self._persist_spacing_s)
+                nets.append(await self._requote(entry, opp.qty, opp.pair_id))
+            cleared = sum(1 for n in nets if n is not None and n >= self._theta)
             lines.append(json.dumps({
-                "ts": now, "pair": pair_id, "qty": opp.qty,
+                "ts": now, "pair": opp.pair_id, "qty": opp.qty,
                 "streamed_net": opp.net_edge_micros,
-                "requoted_net": requoted,
-                "survived": survived,
+                "requote_nets": nets,
+                "n_probes": len(nets),
+                "survived_count": cleared,
+                "survived_all": cleared == len(nets) and len(nets) > 0,
+                "span_ms": wall_ms() - now,
             }))
         if lines:
             text = "\n".join(lines) + "\n"

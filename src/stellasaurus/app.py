@@ -445,6 +445,8 @@ async def run(settings: Settings | None = None) -> None:
                 opp_sink=opp_sink, log_path=settings.requote_probe_log_path,
                 theta_micros=settings.theta_micros,
                 min_interval_s=settings.requote_probe_min_interval_s,
+                persist_probes=settings.requote_probe_persist_probes,
+                persist_spacing_s=settings.requote_probe_persist_spacing_s,
             )
             supervisor.supervise("requote_probe", probe.run)
 

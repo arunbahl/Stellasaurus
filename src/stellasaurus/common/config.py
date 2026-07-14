@@ -149,6 +149,11 @@ class Settings(BaseSettings):
     requote_probe_enabled: bool = False
     requote_probe_log_path: Path = Path("data/requote_probe.jsonl")
     requote_probe_min_interval_s: float = 5.0
+    # Persistence hardening: requote each would-fire pair N times spaced S apart
+    # (concurrent fetch per requote). survived_all = every probe cleared theta —
+    # the strict signal that separates a real dislocation from a timing artifact.
+    requote_probe_persist_probes: int = 5
+    requote_probe_persist_spacing_s: float = 1.0
     # Maker/rebate strategy measurement: simulate resting Poly maker fills and
     # log the fill-conditional hedge economics + hedge-race drift (no real orders).
     maker_sim_enabled: bool = False
