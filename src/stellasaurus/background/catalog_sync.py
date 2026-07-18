@@ -96,20 +96,26 @@ class CatalogSync:
         rotting books while freshness looked fine — found via Stage-2 misses)."""
         if not markets:
             return
-        rows = [
-            MarketRow(
-                venue=m.venue, native_id=m.native_id, title=m.title,
-                rules_text=m.rules_text, settlement_source=m.settlement_source,
-                resolves_at_ms=m.resolves_at_ms, status=m.status,
-                terms_fingerprint=market_fingerprint(m),
-                # Persist the venue's raw fields so downstream matchers can read
-                # structured data (e.g. Polymarket `outcomes`, Kalshi
-                # `yes_sub_title`) needed for deterministic versus-polarity.
-                raw_json=json.dumps(m.raw, default=str),
-            )
-            for m in markets
-        ]
-        changed = await asyncio.to_thread(self._markets.upsert_many, rows)
+        # Build rows (fingerprint + json.dumps of raw) AND upsert entirely in the
+        # worker thread: at catalog scale (~40k markets) doing the json.dumps on
+        # the event loop blocked it for seconds and starved the WS keepalive ping
+        # -> reconnect storm -> unresponsive app.
+        def _build_and_upsert() -> list[tuple[str, str]]:
+            rows = [
+                MarketRow(
+                    venue=m.venue, native_id=m.native_id, title=m.title,
+                    rules_text=m.rules_text, settlement_source=m.settlement_source,
+                    resolves_at_ms=m.resolves_at_ms, status=m.status,
+                    terms_fingerprint=market_fingerprint(m),
+                    # Persist raw fields so matchers can read structured data
+                    # (Polymarket `outcomes`, Kalshi `yes_sub_title`) for versus.
+                    raw_json=json.dumps(m.raw, default=str),
+                )
+                for m in markets
+            ]
+            return self._markets.upsert_many(rows)
+
+        changed = await asyncio.to_thread(_build_and_upsert)
         for venue_str, native_id in changed:
             kt = native_id if venue_str == Venue.KALSHI.value else None
             ps = native_id if venue_str == Venue.POLYMARKET.value else None
