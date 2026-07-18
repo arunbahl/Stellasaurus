@@ -238,14 +238,32 @@ class PairingLoop:
         swept participates, and coverage grows as the rotation progresses.
         """
         now = wall_ms()
-        kalshi_rows = self._markets.unresolved_markets(Venue.KALSHI, now_ms=now)
-        poly_rows = self._markets.unresolved_markets(Venue.POLYMARKET, now_ms=now)
-        kalshi = [_row_to_raw(m) for m in kalshi_rows]
-        poly = [_row_to_raw(m) for m in poly_rows]
+        cycle_budget = self._max_llm_calls if llm_budget is None else llm_budget
+
+        # Load + match OFF the event loop. At catalog scale (100k+ markets) the
+        # market load (json.loads per row), run_matchers, and generate_candidates
+        # are seconds of pure CPU that, run on the loop, starve the WS keepalive
+        # ping -> reconnect storm -> unresponsive app.
+        def _load_and_match() -> tuple[list[MatchedCandidate], list[CandidatePair]]:
+            kalshi = [
+                _row_to_raw(m)
+                for m in self._markets.unresolved_markets(Venue.KALSHI, now_ms=now)
+            ]
+            poly = [
+                _row_to_raw(m)
+                for m in self._markets.unresolved_markets(Venue.POLYMARKET, now_ms=now)
+            ]
+            structured = run_matchers(kalshi, poly)
+            tokens = (
+                generate_candidates(kalshi, poly, min_score=self._min_score)
+                if cycle_budget > 0 else []
+            )
+            return structured, tokens
+
+        structured, token_candidates = await asyncio.to_thread(_load_and_match)
 
         # 1) Structured matchers first (DESIGN §6.2 step 1): deterministic
         #    verdicts are written immediately with source=STRUCTURED — no LLM.
-        structured = run_matchers(kalshi, poly)
         wrote = 0
         llm_queue: list[MatchedCandidate] = []
         matched_legs: set[tuple[str, str]] = set()
@@ -269,15 +287,14 @@ class PairingLoop:
         #    This scans the FULL catalog (tens of thousands of markets each side,
         #    ~tens of seconds) and only feeds the LLM queue — so skip it entirely
         #    on a structured-only pass (budget 0), where it would just block the
-        #    event loop (freezing feeds + the evaluator) for nothing.
-        cycle_budget = self._max_llm_calls if llm_budget is None else llm_budget
-        if cycle_budget > 0:
-            for g in generate_candidates(kalshi, poly, min_score=self._min_score):
-                key = (g.kalshi.native_id, g.poly.native_id)
-                if key not in matched_legs:
-                    llm_queue.append(
-                        MatchedCandidate(g.kalshi, g.poly, g.score, "token")
-                    )
+        #    event loop (freezing feeds + the evaluator) for nothing — hence it
+        #    is skipped in _load_and_match when the budget is 0.
+        for g in token_candidates:
+            key = (g.kalshi.native_id, g.poly.native_id)
+            if key not in matched_legs:
+                llm_queue.append(
+                    MatchedCandidate(g.kalshi, g.poly, g.score, "token")
+                )
 
         # 3) Versus polarity resolution (deterministic) applied to ALL LLM
         #    candidates regardless of how they were generated: a two-outcome
