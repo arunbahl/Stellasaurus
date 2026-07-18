@@ -26,6 +26,9 @@ from stellasaurus.venues.base import RawMarket, VenueClient, market_fingerprint
 
 _log = get_logger("background.catalog_sync")
 
+# Markets that resolved more than this ago are dropped at sync + pruned.
+_RESOLVED_GRACE_MS = 2 * 86_400_000
+
 
 class CatalogSync:
     def __init__(
@@ -94,6 +97,16 @@ class CatalogSync:
         """Fingerprint + batch-upsert in a worker thread so the event loop keeps
         serving the WS feeds (per-row commits at catalog scale starved them,
         rotting books while freshness looked fine — found via Stage-2 misses)."""
+        # Drop already-resolved markets: Kalshi's list endpoint returns the full
+        # HISTORY (350k+ rows, 68% dead), and keeping them bloats every pairing
+        # cycle's load+match until it blocks the loop. A market resolving inside
+        # the grace window is kept so late settlement/pairing still works.
+        from stellasaurus.common.clock import wall_ms as _now
+        cutoff = _now() - _RESOLVED_GRACE_MS
+        markets = [
+            m for m in markets
+            if m.resolves_at_ms is None or m.resolves_at_ms >= cutoff
+        ]
         if not markets:
             return
         # Build rows (fingerprint + json.dumps of raw) AND upsert entirely in the
