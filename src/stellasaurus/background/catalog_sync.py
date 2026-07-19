@@ -113,7 +113,7 @@ class CatalogSync:
         # worker thread: at catalog scale (~40k markets) doing the json.dumps on
         # the event loop blocked it for seconds and starved the WS keepalive ping
         # -> reconnect storm -> unresponsive app.
-        def _build_and_upsert() -> list[tuple[str, str]]:
+        def _build_and_upsert() -> None:
             rows = [
                 MarketRow(
                     venue=m.venue, native_id=m.native_id, title=m.title,
@@ -126,16 +126,41 @@ class CatalogSync:
                 )
                 for m in markets
             ]
-            return self._markets.upsert_many(rows)
+            changed = self._markets.upsert_many(rows)
+            # STALE-flagging stays in the worker too: interleaving these writes
+            # from the LOOP with the worker's transactions made the loop block
+            # on the SQLite write lock (the residual hang after the first fix).
+            for venue_str, native_id in changed:
+                kt = native_id if venue_str == Venue.KALSHI.value else None
+                ps = native_id if venue_str == Venue.POLYMARKET.value else None
+                for pair_id in self._registry.pairs_referencing(
+                    kalshi_ticker=kt, poly_slug=ps
+                ):
+                    self._registry.set_status(pair_id, PairStatus.STALE)
+                    audit(self._audit, actor="catalog_sync", event_type="TERMS_CHANGED",
+                          pair_id=pair_id, venue=venue_str, native_id=native_id)
 
-        changed = await asyncio.to_thread(_build_and_upsert)
-        for venue_str, native_id in changed:
-            kt = native_id if venue_str == Venue.KALSHI.value else None
-            ps = native_id if venue_str == Venue.POLYMARKET.value else None
-            for pair_id in self._registry.pairs_referencing(kalshi_ticker=kt, poly_slug=ps):
-                self._registry.set_status(pair_id, PairStatus.STALE)
-                audit(self._audit, actor="catalog_sync", event_type="TERMS_CHANGED",
-                      pair_id=pair_id, venue=venue_str, native_id=native_id)
+        await asyncio.to_thread(_build_and_upsert)
+
+    async def prune_once(self) -> int:
+        """Periodically delete markets resolved beyond the grace window so the
+        catalog stays bounded (Kalshi accumulates otherwise). Registry-referenced
+        legs are never pruned. Runs entirely in a worker thread."""
+        from stellasaurus.common.clock import wall_ms as _now
+        cutoff = _now() - _RESOLVED_GRACE_MS
+
+        def _prune() -> int:
+            keep = frozenset(
+                nid
+                for e in self._registry.all_entries()
+                for nid in (e.kalshi_ticker, e.poly_market_slug)
+            )
+            return self._markets.prune_resolved(cutoff_ms=cutoff, keep_native_ids=keep)
+
+        deleted = await asyncio.to_thread(_prune)
+        if deleted:
+            _log.info("catalog_pruned", deleted=deleted)
+        return deleted
 
     def _upsert(self, m: RawMarket) -> None:
         fp = market_fingerprint(m)

@@ -75,6 +75,11 @@ class Settings(BaseSettings):
     # --- feed re-planning ---
     subscription_check_seconds: int = 30  # registry-change poll for feed re-plan
 
+    # Periodic catalog prune: markets resolved beyond the sync grace window are
+    # deleted so the catalog stays bounded (Kalshi otherwise accumulates its
+    # full history — observed 278k dead of 361k rows, choking every cycle).
+    catalog_prune_seconds: int = 3600
+
     # --- near-resolution priority sweep (in-game readiness) ---
     # Game-day markets list hours before start; the slow full rotation may not
     # revisit their series in time. This fast cycle re-syncs any Kalshi series
@@ -136,6 +141,9 @@ class Settings(BaseSettings):
     pairing_max_llm_calls: int = 10  # per cycle — bounds LLM spend
     pairing_min_score: float = 0.35  # candidate token-overlap floor
     pairing_llm_concurrency: int = 8  # concurrent equivalence evals per cycle
+    # Only markets resolving within this window are loaded for pairing: cost is
+    # proportional to rows, and years-out markets can't form near-term pairs.
+    pairing_horizon_days: int = 180
 
     # --- dislocation logging (measure how long θ-crossing gaps persist) ---
     # When enabled, every evaluation whose net edge >= the floor is appended to

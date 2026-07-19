@@ -137,9 +137,10 @@ async def test_hanging_retains_reservation_until_flattened(tmp_path):
         book_staleness_ms=10**9,
     )
     for v in (V.KALSHI, V.POLYMARKET):
+        import time as _time
         nb = NativeBook(v, "K" if v is V.KALSHI else "s",
                         (PriceLevel(500_000, 100),), (PriceLevel(510_000, 100),),
-                        None, None, 1, 0, 0)
+                        None, None, 1, _time.monotonic_ns(), 0)
         store.publish_book(normalize(nb, polarity=OutcomePolarity.DIRECT, pair_id="p"))
 
     risk = RiskManager(state=store, positions=positions)

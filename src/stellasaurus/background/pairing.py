@@ -145,6 +145,7 @@ class PairingLoop:
         max_llm_calls: int = 10,
         min_score: float = 0.35,
         llm_concurrency: int = 8,
+        horizon_days: int = 180,
     ) -> None:
         self._markets = markets_repo
         self._engine = engine
@@ -154,6 +155,7 @@ class PairingLoop:
         self._max_llm_calls = max_llm_calls
         self._min_score = min_score
         self._llm_concurrency = max(1, llm_concurrency)
+        self._horizon_ms = horizon_days * _DAY_MS
 
     def audit_polarity(self) -> int:
         """Re-check every VERIFIED versus pair's polarity against the current
@@ -247,11 +249,15 @@ class PairingLoop:
         def _load_and_match() -> tuple[list[MatchedCandidate], list[CandidatePair]]:
             kalshi = [
                 _row_to_raw(m)
-                for m in self._markets.unresolved_markets(Venue.KALSHI, now_ms=now)
+                for m in self._markets.unresolved_markets(
+                    Venue.KALSHI, now_ms=now, horizon_ms=self._horizon_ms
+                )
             ]
             poly = [
                 _row_to_raw(m)
-                for m in self._markets.unresolved_markets(Venue.POLYMARKET, now_ms=now)
+                for m in self._markets.unresolved_markets(
+                    Venue.POLYMARKET, now_ms=now, horizon_ms=self._horizon_ms
+                )
             ]
             structured = run_matchers(kalshi, poly)
             tokens = (

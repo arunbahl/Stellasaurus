@@ -73,40 +73,74 @@ class MarketsRepo:
         return None
 
     def upsert_many(self, markets: list[MarketRow]) -> list[tuple[str, str]]:
-        """Batch upsert in ONE transaction (a per-row connect/commit at catalog
-        scale blocked the event loop for seconds and starved the WS feeds).
+        """Batch upsert in CHUNKED transactions. One row-per-commit blocked the
+        loop (Stage-2 finding); but one giant transaction is equally bad from
+        the other side — it holds the SQLite write lock for seconds, and any
+        loop-side DB call (audit drain, STALE-flag) then blocks the event loop
+        waiting on it. ~1k-row commits keep every write-lock window short.
         Returns [(venue, native_id)] whose terms_fingerprint changed."""
         if not markets:
             return []
         now = wall_ms()
         changed: list[tuple[str, str]] = []
+        chunk_size = 1000
         with self._db.connect() as conn:
-            for m in markets:
-                prior = conn.execute(
-                    "SELECT terms_fingerprint FROM markets WHERE venue=? AND native_id=?",
-                    (m.venue.value, m.native_id),
-                ).fetchone()
-                if prior and prior["terms_fingerprint"] != m.terms_fingerprint:
-                    changed.append((m.venue.value, m.native_id))
-                conn.execute(
-                    """
-                    INSERT INTO markets (venue, native_id, title, rules_text, settlement_source,
-                                         resolves_at_ms, status, terms_fingerprint, raw_json,
-                                         first_seen_ms, updated_ms)
-                    VALUES (?,?,?,?,?,?,?,?,?,?,?)
-                    ON CONFLICT(venue, native_id) DO UPDATE SET
-                        title=excluded.title, rules_text=excluded.rules_text,
-                        settlement_source=excluded.settlement_source,
-                        resolves_at_ms=excluded.resolves_at_ms, status=excluded.status,
-                        terms_fingerprint=excluded.terms_fingerprint,
-                        raw_json=excluded.raw_json, updated_ms=excluded.updated_ms
-                    """,
-                    (m.venue.value, m.native_id, m.title, m.rules_text,
-                     m.settlement_source, m.resolves_at_ms, m.status,
-                     m.terms_fingerprint, m.raw_json, now, now),
-                )
-            conn.commit()
+            for start in range(0, len(markets), chunk_size):
+                for m in markets[start:start + chunk_size]:
+                    prior = conn.execute(
+                        "SELECT terms_fingerprint FROM markets WHERE venue=? AND native_id=?",
+                        (m.venue.value, m.native_id),
+                    ).fetchone()
+                    if prior and prior["terms_fingerprint"] != m.terms_fingerprint:
+                        changed.append((m.venue.value, m.native_id))
+                    conn.execute(
+                        """
+                        INSERT INTO markets (venue, native_id, title, rules_text, settlement_source,
+                                             resolves_at_ms, status, terms_fingerprint, raw_json,
+                                             first_seen_ms, updated_ms)
+                        VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                        ON CONFLICT(venue, native_id) DO UPDATE SET
+                            title=excluded.title, rules_text=excluded.rules_text,
+                            settlement_source=excluded.settlement_source,
+                            resolves_at_ms=excluded.resolves_at_ms, status=excluded.status,
+                            terms_fingerprint=excluded.terms_fingerprint,
+                            raw_json=excluded.raw_json, updated_ms=excluded.updated_ms
+                        """,
+                        (m.venue.value, m.native_id, m.title, m.rules_text,
+                         m.settlement_source, m.resolves_at_ms, m.status,
+                         m.terms_fingerprint, m.raw_json, now, now),
+                    )
+                conn.commit()  # short write-lock windows
         return changed
+
+    def prune_resolved(
+        self, *, cutoff_ms: int, keep_native_ids: frozenset[str] = frozenset()
+    ) -> int:
+        """Delete markets that resolved before ``cutoff_ms`` (chunked commits),
+        never touching ids in ``keep_native_ids`` (registry-referenced legs).
+        Kalshi's catalog is unbounded history — without pruning, dead markets
+        accumulate (observed: 278k of 361k rows) until every pairing load and
+        sweep chokes on them. Returns rows deleted."""
+        deleted = 0
+        keep = list(keep_native_ids)
+        placeholders = ",".join("?" * len(keep)) if keep else "''"
+        with self._db.connect() as conn:
+            while True:
+                rows = conn.execute(
+                    f"SELECT native_id FROM markets "
+                    f"WHERE resolves_at_ms IS NOT NULL AND resolves_at_ms < ? "
+                    f"AND native_id NOT IN ({placeholders}) LIMIT 5000",
+                    (cutoff_ms, *keep),
+                ).fetchall()
+                if not rows:
+                    break
+                conn.executemany(
+                    "DELETE FROM markets WHERE native_id = ?",
+                    [(r["native_id"],) for r in rows],
+                )
+                conn.commit()
+                deleted += len(rows)
+        return deleted
 
     def get(self, venue: Venue, native_id: str) -> MarketRow | None:
         with self._db.connect() as conn:
@@ -116,15 +150,26 @@ class MarketsRepo:
             ).fetchone()
         return _to_row(row) if row else None
 
-    def unresolved_markets(self, venue: Venue, *, now_ms: int) -> list[MarketRow]:
-        """Every catalogued market for a venue that has not yet resolved —
-        the accumulated result of all sweeps, which is what pairing consumes."""
+    def unresolved_markets(
+        self, venue: Venue, *, now_ms: int, horizon_ms: int | None = None
+    ) -> list[MarketRow]:
+        """Catalogued markets for a venue that resolve in the future — the
+        accumulated result of all sweeps, which is what pairing consumes.
+
+        ``horizon_ms`` bounds the window (only markets resolving within it):
+        pairing cost is proportional to rows loaded, and markets years out
+        can't form near-term tradeable pairs. NULL-resolve rows are excluded —
+        every matcher requires a resolution time, so they're pure load."""
+        query = (
+            "SELECT * FROM markets WHERE venue=? "
+            "AND resolves_at_ms IS NOT NULL AND resolves_at_ms > ?"
+        )
+        params: list[object] = [venue.value, now_ms]
+        if horizon_ms is not None:
+            query += " AND resolves_at_ms <= ?"
+            params.append(now_ms + horizon_ms)
         with self._db.connect() as conn:
-            rows = conn.execute(
-                "SELECT * FROM markets WHERE venue=? "
-                "AND (resolves_at_ms IS NULL OR resolves_at_ms > ?)",
-                (venue.value, now_ms),
-            ).fetchall()
+            rows = conn.execute(query, params).fetchall()
         return [_to_row(r) for r in rows]
 
     def near_resolution_native_ids(

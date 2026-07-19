@@ -331,9 +331,13 @@ def _risk_fixture(tmp_path, max_open_pairs=1, max_committed=10**12):
     from stellasaurus.hot_path.normalize import normalize
     for pid, k, s in (("p1", "K1", "s1"), ("p2", "K2", "s2")):
         for v in (Venue.KALSHI, Venue.POLYMARKET):
+            # recv_mono_ns must be CURRENT monotonic time: a 0 here silently
+            # becomes stale once machine uptime exceeds the staleness threshold
+            # (a real time-bomb that broke these tests at ~13 days uptime).
+            import time as _time
             nb = NativeBook(v, k if v is Venue.KALSHI else s,
                             (PriceLevel(500_000, 100),), (PriceLevel(510_000, 100),),
-                            None, None, 1, 0, 0)
+                            None, None, 1, _time.monotonic_ns(), 0)
             store.publish_book(normalize(nb, polarity=OutcomePolarity.DIRECT, pair_id=pid))
     return RiskManager(state=store, positions=PositionsStore()), store
 

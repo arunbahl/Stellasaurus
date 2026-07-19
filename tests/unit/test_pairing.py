@@ -10,11 +10,14 @@ from stellasaurus.hot_path.state import HotStateStore
 from stellasaurus.storage.audit_repo import AuditRepo
 from stellasaurus.storage.db import Database
 from stellasaurus.storage.markets_repo import MarketsRepo
+from stellasaurus.common.clock import wall_ms as _wall_ms
 from stellasaurus.storage.registry_repo import RegistryRepo
 from stellasaurus.venues.base import RawMarket
 
 DAY = 86_400_000
-T0 = 1_999_000_000_000  # far-future UTC instant (markets must be unresolved)
+# Resolves a few days out: must be in the FUTURE and inside the pairing
+# horizon window (a fixed far-future constant broke when the horizon landed).
+T0 = _wall_ms() + 5 * 86_400_000
 
 
 def _m(venue: Venue, nid: str, title: str, resolves: int = T0, rules: str = "") -> RawMarket:

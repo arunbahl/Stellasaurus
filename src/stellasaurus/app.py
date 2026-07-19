@@ -358,6 +358,7 @@ async def run(settings: Settings | None = None) -> None:
             max_llm_calls=settings.pairing_max_llm_calls,
             min_score=settings.pairing_min_score,
             llm_concurrency=settings.pairing_llm_concurrency,
+            horizon_days=settings.pairing_horizon_days,
         )
         if settings.pairing_enabled and engine.configured:
 
@@ -412,6 +413,13 @@ async def run(settings: Settings | None = None) -> None:
 
             supervisor.run_periodic("dislocation_drain", 1, drain_dislocations)
         supervisor.run_periodic("halt_watch", 10, halt.watch_once)
+        # Bounded catalog: prune dead markets periodically (worker thread).
+        async def catalog_prune() -> None:
+            await catalog.prune_once()
+
+        supervisor.run_periodic(
+            "catalog_prune", settings.catalog_prune_seconds, catalog_prune
+        )
 
         async def polarity_audit() -> None:
             # DB reads + upserts off the event loop; a correction re-publishes the
