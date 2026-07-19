@@ -4,13 +4,13 @@ from stellasaurus.background.pairing import PairingLoop, generate_candidates
 from stellasaurus.background.registry_loader import RegistryLoader
 from stellasaurus.baml_client.types import EquivalenceVerdict
 from stellasaurus.baml_client.types import OutcomePolarity as BamlPolarity
+from stellasaurus.common.clock import wall_ms as _wall_ms
 from stellasaurus.common.types import OutcomePolarity, PairSource, PairStatus, Venue
 from stellasaurus.hot_path.snapshot import LimitsSnapshot, RegistrySnapshot
 from stellasaurus.hot_path.state import HotStateStore
 from stellasaurus.storage.audit_repo import AuditRepo
 from stellasaurus.storage.db import Database
 from stellasaurus.storage.markets_repo import MarketsRepo
-from stellasaurus.common.clock import wall_ms as _wall_ms
 from stellasaurus.storage.registry_repo import RegistryRepo
 from stellasaurus.venues.base import RawMarket
 
